@@ -1,46 +1,126 @@
-#include <string.h>
 #include <stdio.h>
 #include <assert.h>
 
 #include "parser.h"
+#include "mem.h"
 
-const u8 CRLF[2] = { '\r', '\n' };
-const u8 SP = ' ';
+constexpr u8 MAX_DIGITS_U8 = 3;
 
-constexpr u8 GET_METHOD_NAME[3] = { 'G', 'E', 'T' };
-constexpr u8 POST_METHOD_NAME[4] = { 'P', 'O', 'S', 'T' };
+u8 strnToU8(u8** firstInvalidPtr, u8* str, u8 strLen)
+{
+	u8 digits[MAX_DIGITS_U8] = {0};
+	u8 nDigits = 0;
+	u8 minSize = MAX_DIGITS_U8;
+	if (strLen < MAX_DIGITS_U8)
+	{
+		minSize = strLen;
+	}
 
-constexpr u32 GET_METHOD_NAME_LEN = sizeof(GET_METHOD_NAME);
-constexpr u32 POST_METHOD_NAME_LEN = sizeof(POST_METHOD_NAME);
+	for (;nDigits < minSize; ++nDigits, ++str)
+	{ 
+		u8 digit = *str - 0x30;
+		if (digit < 0 || digit > 9)
+		{
+			break;
+		}
+		digits[nDigits] = digit;
+	}
+	
+	*firstInvalidPtr = str;
+	u8 result = 0;
+	u8 power = 1;
 
-i32 parseHeader(u8* buffer, u32 readBytes)
+	for (int i = nDigits - 1; i >= 0; --i)
+	{
+		result += digits[i] * power;
+		power *= 10;
+	}
+
+	return result;
+}
+
+i16 parseFieldLines(http_header_map* headerMap, u8* headerLineStr, u8* limit)
+{
+	http_header_map_entry currentEntry;
+	for (;;)
+	{
+		u8* nextCrlfPtr = memFindCrlf(headerLineStr, limit - headerLineStr);
+		if (!nextCrlfPtr)
+		{
+			return -1;
+		}
+
+		u8* colonPtr = memFindChr(headerLineStr, nextCrlfPtr - headerLineStr, ':');
+		if (!colonPtr)
+		{
+			return -1;
+		}
+
+		if (*(colonPtr - 1) == ' ')
+		{
+			return -1;
+		}
+
+		u8* headerValuePtr = colonPtr + 1;
+		if (headerValuePtr == nextCrlfPtr)
+		{
+			return -1;
+		}
+
+		if (*headerValuePtr == ' ')
+		{
+			++headerValuePtr;
+			if (headerValuePtr == nextCrlfPtr)
+			{
+				return -1;
+			}
+		}
+
+		currentEntry.headerName = headerLineStr;
+		currentEntry.headerNameLen = colonPtr - headerLineStr;
+		currentEntry.headerValue = headerValuePtr;
+		currentEntry.headerValueLen = nextCrlfPtr - headerValuePtr;
+		insert(headerMap, currentEntry);
+
+		if (nextCrlfPtr + sizeof(CRLF) == limit)
+		{
+			return 0;
+		}
+
+		headerLineStr = nextCrlfPtr + sizeof(CRLF);
+	}		
+
+	return 0;
+}
+
+i16 parseHeader(http_header* result, u8* buffer, u32 readBytes)
 {
 	// TODO(louis): Introduce proper error handling
-	
-	u8* crlfPointer = (u8*) memmem(buffer, readBytes, CRLF, sizeof(CRLF));
+	u8* limit = buffer + readBytes - sizeof(CRLF);
+	u8* crlfPointer = memFindCrlf(buffer, readBytes);
 	if (!crlfPointer)
 	{
 		return -1;
 	}
 
-	u32 requestLineSize = crlfPointer - buffer;
-	u8* spacePointer = (u8*) memchr(buffer, SP, requestLineSize);
+	usize requestLineSize = crlfPointer - buffer;
+	u8* requestTargetPtr = memFindChr(buffer, requestLineSize, SP);
 
-	if (!spacePointer)
+	if (!requestTargetPtr)
 	{
 		return -1;
 	}
 
-	u32 methodLen = spacePointer - buffer;
+	usize methodLen = requestTargetPtr - buffer;
 	http_method httpMethod;
 
 	switch (methodLen)
 	{
 		case GET_METHOD_NAME_LEN:
 		{
-			if (memcmp(buffer, GET_METHOD_NAME, GET_METHOD_NAME_LEN) == 0) 
+			if (memEqlGet(buffer)) 
 			{
-				httpMethod = GET;
+				result->httpMethod = GET;
 			}
 			else 
 			{
@@ -52,9 +132,9 @@ i32 parseHeader(u8* buffer, u32 readBytes)
 		}
 		case POST_METHOD_NAME_LEN:
 		{
-			if (memcmp(buffer, POST_METHOD_NAME, POST_METHOD_NAME_LEN) == 0) 
+			if (memEqlPost(buffer)) 
 			{
-				httpMethod = POST;
+				result->httpMethod = POST;
 			}
 			else 
 			{
@@ -71,25 +151,73 @@ i32 parseHeader(u8* buffer, u32 readBytes)
 		}
 	}
 
-	++spacePointer;
-
-	i32 remainingSize = crlfPointer - spacePointer;
-	assert(remainingSize > 0);
-
-	u8* spacePointerTwo = (u8*) memchr(spacePointer, SP, remainingSize);
-	if (!spacePointerTwo)
+	++requestTargetPtr;
+	isize remainingSize = crlfPointer - requestTargetPtr;
+	if (remainingSize <= 0)
 	{
 		return -1;
 	}
 
-	i32 requestTargetLen = spacePointerTwo - spacePointer;
-	assert(requestTargetLen > 0);
+	u8* httpVersionPtr = memFindChr(requestTargetPtr, remainingSize, SP);
+	if (!httpVersionPtr)
+	{
+		return -1;
+	}
 
-	++spacePointerTwo;
-	i32 httpVersionLen = crlfPointer - spacePointerTwo;
+	i32 requestTargetLen = httpVersionPtr - requestTargetPtr;
+	if (requestTargetLen <= 0)
+	{
+		return -1;
+	}
 
-	fprintf(stdout, "http method: %d\nrequest-target %.*s\nhttp-version: %.*s\n", 
-			httpMethod, requestTargetLen, spacePointer, 
-		 	httpVersionLen, spacePointerTwo);
+	result->requestTarget = requestTargetPtr;
+	result->requestTargetLen = requestTargetLen;
+
+	++httpVersionPtr;
+	isize httpVersionLen = crlfPointer - httpVersionPtr;
+	if (httpVersionLen <= 0 || httpVersionLen < sizeof(HTTP_VERSION_PREFIX) + 3)
+	{
+		return -1;
+	}
+
+	if (!memEqlHttpVersionPrefix(httpVersionPtr))
+	{
+		return -1;
+	}
+
+	httpVersionPtr += sizeof(HTTP_VERSION_PREFIX);
+	u8* dotPtr; 
+	u8 majorVersion = strnToU8(&dotPtr, httpVersionPtr, crlfPointer - httpVersionPtr);
+	if (httpVersionPtr == dotPtr || *dotPtr != '.')
+	{
+		return -1;
+	}
+
+	++dotPtr;
+	if (dotPtr >= crlfPointer)
+	{
+		return -1;
+	}
+
+	u8 minorVersion = strnToU8(&httpVersionPtr, dotPtr, crlfPointer - dotPtr);
+	if (httpVersionPtr != crlfPointer)
+	{
+		return -1;
+	}
+
+	result->httpVersion.major = majorVersion;
+	result->httpVersion.minor = minorVersion;
+
+	u8* headerLineStartPtr = crlfPointer + sizeof(CRLF);
+	if (headerLineStartPtr <= limit)
+	{
+		if (parseFieldLines(&result->httpHeaderMap, 
+					  		headerLineStartPtr, limit) == -1)
+		{
+			return -1;
+		}
+	}
+
+
 	return 0;
 }

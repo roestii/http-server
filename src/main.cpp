@@ -86,7 +86,12 @@ i32 serve(u16 port)
 				goto close_client_socket;
 			}
 
-			parseHeader(buffer, readBytes);
+			http_header httpHeader;
+			if (parseHeader(&httpHeader, buffer, readBytes) == -1)
+			{
+				goto close_client_socket;
+			}
+			printf("\n");
 		}
 
 	close_client_socket:
