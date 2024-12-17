@@ -17,6 +17,14 @@ constexpr u8 POST_METHOD_NAME[4] = { 'P', 'O', 'S', 'T' };
 constexpr u32 GET_METHOD_NAME_LEN = sizeof(GET_METHOD_NAME);
 constexpr u32 POST_METHOD_NAME_LEN = sizeof(POST_METHOD_NAME);
 
+struct string 
+{
+	u8* ptr;
+	usize len;
+};
+
+bool stringEql(string*, string*);
+
 bool memEql(u8*, u8*, usize);
 bool memEqlGet(u8*);
 bool memEqlPost(u8*);

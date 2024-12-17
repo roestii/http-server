@@ -1,5 +1,26 @@
 #include "mem.h"
 
+bool memEql(u8* a, u8* b, usize len)
+{
+	for (int i = 0; i < len; ++i, ++a, ++b)
+	{
+		if (*a != *b)
+		{
+			return false;
+		}
+	}
+
+	return true;
+}
+
+bool stringEql(string* a, string* b)
+{
+	if (a->len != b->len)
+		return false;
+
+	return memEql(a->ptr, b->ptr, a->len);
+}
+
 // TODO(louis): maybe speed this up with vector instruction sets
 bool memEqlGet(u8* haystack)
 {
@@ -46,18 +67,6 @@ u8* memFindCrlf(u8* haystack, usize haystackLen)
 }
 
 
-bool memEql(u8* a, u8* b, usize len)
-{
-	for (int i = 0; i < len; ++i, ++a, ++b)
-	{
-		if (*a != *b)
-		{
-			return false;
-		}
-	}
-
-	return true;
-}
 
 u8* memFindChr(u8* haystack, usize haystackLen, u8 needle)
 {
@@ -76,7 +85,7 @@ u8* memFindMem(u8* haystack, usize haystackLen, u8* needle, usize needleLen)
 {
 	for (int i = 0; i <= haystackLen - needleLen; ++i, ++haystack)
 	{
-		if (memEql(haystack, needle + 1, needleLen))
+		if (memEql(haystack, needle, needleLen))
 		{
 			return haystack;
 		}

@@ -1,3 +1,5 @@
+// TODO(louis):
+// 		- rename parser to http
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <stdio.h>
@@ -5,8 +7,10 @@
 #include <errno.h>
 #include <signal.h>
 
+#include "http_header_map.h"
+#include "arena_allocator.h"
 #include "types.h"
-#include "parser.h"
+#include "http.h"
 
 u16 MAX_N_PENDING_CONNECTIONS = 128;
 
@@ -32,7 +36,11 @@ void signalHandler(i32 signalId)
 }
 
 i32 serve(u16 port)
-{
+{ 
+	arena_allocator arena;
+	if (init(&arena, 1024 * 1024) == -1)
+		return -1;
+
 	socketDescriptor = socket(AF_INET, SOCK_STREAM, 0);
 	if (socketDescriptor == -1)
 	{
@@ -61,6 +69,11 @@ i32 serve(u16 port)
 		goto close_server_socket;
 	}
 
+	http_header httpHeader;
+	// TODO(louis): move this into a constant
+	if (init(&httpHeader.headerMap, &arena, 128) == -1)
+		goto close_server_socket;
+
 	for (;;)
 	{
 		// TODO(louis): spawn multiple threads that can accept and handle connections.
@@ -86,15 +99,14 @@ i32 serve(u16 port)
 				goto close_client_socket;
 			}
 
-			http_header httpHeader;
 			if (parseHeader(&httpHeader, buffer, readBytes) == -1)
 			{
 				goto close_client_socket;
 			}
-			printf("\n");
 		}
 
 	close_client_socket:
+		clear(&httpHeader.headerMap);
 		if (clientSocketDescriptor >= 0)
 		{
 			if (close(clientSocketDescriptor) == -1)
@@ -105,6 +117,8 @@ i32 serve(u16 port)
 	}
 
 close_server_socket:
+	// TODO(louis): make sure that we really call munmap on SIGINT
+	destroy(&arena);
 	if (socketDescriptor >= 0)
 	{
 		close(socketDescriptor);

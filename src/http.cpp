@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <assert.h>
 
-#include "parser.h"
+#include "http.h"
 #include "mem.h"
 
 constexpr u8 MAX_DIGITS_U8 = 3;
@@ -12,17 +12,14 @@ u8 strnToU8(u8** firstInvalidPtr, u8* str, u8 strLen)
 	u8 nDigits = 0;
 	u8 minSize = MAX_DIGITS_U8;
 	if (strLen < MAX_DIGITS_U8)
-	{
 		minSize = strLen;
-	}
 
 	for (;nDigits < minSize; ++nDigits, ++str)
 	{ 
 		u8 digit = *str - 0x30;
 		if (digit < 0 || digit > 9)
-		{
 			break;
-		}
+
 		digits[nDigits] = digit;
 	}
 	
@@ -41,51 +38,44 @@ u8 strnToU8(u8** firstInvalidPtr, u8* str, u8 strLen)
 
 i16 parseFieldLines(http_header_map* headerMap, u8* headerLineStr, u8* limit)
 {
-	http_header_map_entry currentEntry;
+	string fieldName;
+	string fieldValue;
+
 	for (;;)
 	{
 		u8* nextCrlfPtr = memFindCrlf(headerLineStr, limit - headerLineStr);
 		if (!nextCrlfPtr)
-		{
 			return -1;
-		}
 
 		u8* colonPtr = memFindChr(headerLineStr, nextCrlfPtr - headerLineStr, ':');
 		if (!colonPtr)
-		{
 			return -1;
-		}
 
 		if (*(colonPtr - 1) == ' ')
-		{
 			return -1;
-		}
 
 		u8* headerValuePtr = colonPtr + 1;
 		if (headerValuePtr == nextCrlfPtr)
-		{
 			return -1;
-		}
 
 		if (*headerValuePtr == ' ')
 		{
 			++headerValuePtr;
 			if (headerValuePtr == nextCrlfPtr)
-			{
 				return -1;
-			}
 		}
 
-		currentEntry.headerName = headerLineStr;
-		currentEntry.headerNameLen = colonPtr - headerLineStr;
-		currentEntry.headerValue = headerValuePtr;
-		currentEntry.headerValueLen = nextCrlfPtr - headerValuePtr;
-		insert(headerMap, currentEntry);
+		usize fieldValueLen = nextCrlfPtr - headerValuePtr;
+		if (*(nextCrlfPtr - 1) == ' ')
+			--fieldValueLen;
+
+		fieldName = { headerLineStr, colonPtr - headerLineStr };
+		fieldValue = { headerValuePtr, fieldValueLen };
+		if (insert(headerMap, &fieldName, &fieldValue) == -1)
+			return -1;
 
 		if (nextCrlfPtr + sizeof(CRLF) == limit)
-		{
 			return 0;
-		}
 
 		headerLineStr = nextCrlfPtr + sizeof(CRLF);
 	}		
@@ -120,7 +110,7 @@ i16 parseHeader(http_header* result, u8* buffer, u32 readBytes)
 		{
 			if (memEqlGet(buffer)) 
 			{
-				result->httpMethod = GET;
+				result->method = GET;
 			}
 			else 
 			{
@@ -134,7 +124,7 @@ i16 parseHeader(http_header* result, u8* buffer, u32 readBytes)
 		{
 			if (memEqlPost(buffer)) 
 			{
-				result->httpMethod = POST;
+				result->method = POST;
 			}
 			else 
 			{
@@ -170,8 +160,7 @@ i16 parseHeader(http_header* result, u8* buffer, u32 readBytes)
 		return -1;
 	}
 
-	result->requestTarget = requestTargetPtr;
-	result->requestTargetLen = requestTargetLen;
+	result->requestTarget = { requestTargetPtr, requestTargetLen };
 
 	++httpVersionPtr;
 	isize httpVersionLen = crlfPointer - httpVersionPtr;
@@ -205,13 +194,13 @@ i16 parseHeader(http_header* result, u8* buffer, u32 readBytes)
 		return -1;
 	}
 
-	result->httpVersion.major = majorVersion;
-	result->httpVersion.minor = minorVersion;
+	result->version.major = majorVersion;
+	result->version.minor = minorVersion;
 
 	u8* headerLineStartPtr = crlfPointer + sizeof(CRLF);
 	if (headerLineStartPtr <= limit)
 	{
-		if (parseFieldLines(&result->httpHeaderMap, 
+		if (parseFieldLines(&result->headerMap, 
 					  		headerLineStartPtr, limit) == -1)
 		{
 			return -1;
