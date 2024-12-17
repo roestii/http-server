@@ -28,6 +28,7 @@ bool stringEql(string*, string*);
 bool memEql(u8*, u8*, usize);
 bool memEqlGet(u8*);
 bool memEqlPost(u8*);
+bool memEqlCrlf(u8*);
 bool memEqlHttpVersionPrefix(u8*);
 
 u8* memFindChr(u8*, usize, u8);

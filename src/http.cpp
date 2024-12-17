@@ -43,6 +43,9 @@ i16 parseFieldLines(http_header_map* headerMap, u8* headerLineStr, u8* limit)
 
 	for (;;)
 	{
+		if (limit - headerLineStr >= 2 && memEqlCrlf(headerLineStr))
+			return 0;
+
 		u8* nextCrlfPtr = memFindCrlf(headerLineStr, limit - headerLineStr);
 		if (!nextCrlfPtr)
 			return -1;
@@ -74,9 +77,6 @@ i16 parseFieldLines(http_header_map* headerMap, u8* headerLineStr, u8* limit)
 		if (insert(headerMap, &fieldName, &fieldValue) == -1)
 			return -1;
 
-		if (nextCrlfPtr + sizeof(CRLF) == limit)
-			return 0;
-
 		headerLineStr = nextCrlfPtr + sizeof(CRLF);
 	}		
 
@@ -86,7 +86,7 @@ i16 parseFieldLines(http_header_map* headerMap, u8* headerLineStr, u8* limit)
 i16 parseHeader(http_header* result, u8* buffer, u32 readBytes)
 {
 	// TODO(louis): Introduce proper error handling
-	u8* limit = buffer + readBytes - sizeof(CRLF);
+	u8* limit = buffer + readBytes;
 	u8* crlfPointer = memFindCrlf(buffer, readBytes);
 	if (!crlfPointer)
 	{

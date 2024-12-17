@@ -21,6 +21,14 @@ bool stringEql(string* a, string* b)
 	return memEql(a->ptr, b->ptr, a->len);
 }
 
+bool memEqlCrlf(u8* haystack)
+{
+	// NOTE(louis): the caller has to ensure that the size of the haystack is at least 
+	// as long as GET
+	return *haystack == CRLF[0] 
+		   && *(haystack + 1) == CRLF[1];
+}
+
 // TODO(louis): maybe speed this up with vector instruction sets
 bool memEqlGet(u8* haystack)
 {

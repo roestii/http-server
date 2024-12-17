@@ -89,7 +89,10 @@ i16 insert(http_header_map* headerMap, string* fieldName, string* fieldValue)
 			{
 				// NOTE(louis): If we encounter the same fieldValue we just insert another entry
 				// Euclidean integer modulo
-				u32 recordPosition = (probeBucket->hash % tableCap + tableCap) % tableCap;
+				u32 recordPosition = probeBucket->hash % tableCap;
+				if (recordPosition < 0)
+					recordPosition += tableCap;
+
 				if (probePosition > recordPosition)
 				{
 					http_header_bucket tmpBucket = *probeBucket;
@@ -100,6 +103,7 @@ i16 insert(http_header_map* headerMap, string* fieldName, string* fieldValue)
 					*fieldName = tmpBucket.fieldName;
 					*fieldValue = tmpBucket.fieldValue;
 					probePosition = recordPosition;
+					key = tmpBucket.hash;
 
 					if (probePosition > headerMap->maxDIB)
 						headerMap->maxDIB = probePosition;
