@@ -1,5 +1,13 @@
 #include "mem.h"
 
+void memCpy(u8* dest, u8* src, usize len)
+{
+	for (int i = 0; i < len; ++i, ++dest, ++src)
+	{
+		*dest = *src;
+	}
+}
+
 bool memEql(u8* a, u8* b, usize len)
 {
 	for (int i = 0; i < len; ++i, ++a, ++b)
@@ -58,6 +66,22 @@ bool memEqlHttpVersionPrefix(u8* haystack)
 		   && *(haystack + 2) == HTTP_VERSION_PREFIX[2]
 		   && *(haystack + 3) == HTTP_VERSION_PREFIX[3]
 		   && *(haystack + 4) == HTTP_VERSION_PREFIX[4];
+}
+
+u8* memFind2Crlf(u8* haystack, usize haystackLen)
+{
+	for (int i = 0; i <= haystackLen - 2 * CRLF_LEN; ++i, ++haystack)
+	{
+		if (*haystack == CRLF[0]
+			&& *(haystack + 1) == CRLF[1]
+			&& *(haystack + 2) == CRLF[0]
+			&& *(haystack + 3) == CRLF[1])
+		{
+			return haystack;
+		}
+	}
+
+	return NULL;
 }
 
 u8* memFindCrlf(u8* haystack, usize haystackLen)

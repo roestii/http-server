@@ -20,7 +20,7 @@ constexpr u32 POST_METHOD_NAME_LEN = sizeof(POST_METHOD_NAME);
 struct string 
 {
 	u8* ptr;
-	usize len;
+	isize len;
 };
 
 bool stringEql(string*, string*);
@@ -33,6 +33,9 @@ bool memEqlHttpVersionPrefix(u8*);
 
 u8* memFindChr(u8*, usize, u8);
 u8* memFindCrlf(u8*, usize);
+u8* memFind2Crlf(u8*, usize);
 u8* memFindMem(u8*, usize, u8*, usize);
+
+void memCpy(u8*, u8*, usize);
 
 #endif

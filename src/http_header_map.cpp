@@ -1,8 +1,5 @@
 #include "http_header_map.h"
 
-constexpr u64 HASH_P = 53;
-constexpr u64 HASH_M = 1e9 + 9;
-
 i16 init(http_header_map* result, arena_allocator* alloc, u32 capacity)
 {
 	result->alloc = alloc;
@@ -34,6 +31,7 @@ void clear(http_header_map* headerMap)
 			currentBucket->tag = EMPTY;
 	}
 }
+
 
 u64 hash(string* value)
 {
@@ -73,7 +71,7 @@ i16 insert(http_header_map* headerMap, string* fieldName, string* fieldValue)
 			{
 				probeBucket->fieldName = *fieldName;	
 				probeBucket->fieldValue = *fieldValue;	
-				probeBucket->hash = key;	
+				probeBucket->key = key;	
 				probeBucket->tag = INITIALIZED;
 
 				if (probePosition > headerMap->maxDIB)
@@ -89,7 +87,7 @@ i16 insert(http_header_map* headerMap, string* fieldName, string* fieldValue)
 			{
 				// NOTE(louis): If we encounter the same fieldValue we just insert another entry
 				// Euclidean integer modulo
-				u32 recordPosition = probeBucket->hash % tableCap;
+				u32 recordPosition = probeBucket->key % tableCap;
 				if (recordPosition < 0)
 					recordPosition += tableCap;
 
@@ -98,12 +96,12 @@ i16 insert(http_header_map* headerMap, string* fieldName, string* fieldValue)
 					http_header_bucket tmpBucket = *probeBucket;
 					probeBucket->fieldName = *fieldName;
 					probeBucket->fieldValue = *fieldValue;
-	  				probeBucket->hash = key;	
+	  				probeBucket->key = key;	
 
 					*fieldName = tmpBucket.fieldName;
 					*fieldValue = tmpBucket.fieldValue;
 					probePosition = recordPosition;
-					key = tmpBucket.hash;
+					key = tmpBucket.key;
 
 					if (probePosition > headerMap->maxDIB)
 						headerMap->maxDIB = probePosition;
@@ -128,26 +126,22 @@ i16 get(string* result, http_header_map* headerMap, string* fieldName)
 
 		switch (probeBucket->tag)
 		{
-			case EMPTY:
-			{
-				return -1;
-			}
 			case INITIALIZED:
 			{
 				if (stringEql(fieldName, &probeBucket->fieldName))
 				{ 
 					*result = probeBucket->fieldValue;
-					return 0;
+					return 1;
 				}
 			}
+			case EMPTY:
+				return 0;
 			case TOMBSTONE:
-			{
 				break;
-			}
 		}
 	}
 
-	return -1;
+	return 0;
 }
 
 i16 del(http_header_map* headerMap, string* fieldName)
@@ -167,7 +161,7 @@ i16 del(http_header_map* headerMap, string* fieldName)
 		{
 			case EMPTY:
 			{
-				return -1;
+				return 0;
 			}
 			case INITIALIZED:
 			{
@@ -175,7 +169,7 @@ i16 del(http_header_map* headerMap, string* fieldName)
 				{ 
 					probeBucket->tag = TOMBSTONE;
 					--headerMap->len;
-					return 0;
+					return 1;
 				}
 			}
 			case TOMBSTONE:
@@ -185,5 +179,75 @@ i16 del(http_header_map* headerMap, string* fieldName)
 		}
 	}
 
-	return -1;
+	return 0;
+}
+
+i16 getHash(string* result, http_header_map* headerMap, u64 digest, string* fieldName)
+{
+	u32 tableCap = headerMap->capacity;
+	u32 key = digest % tableCap;
+	u32 probePosition = headerMap->minDIB;
+	if (probePosition < 0)
+		probePosition = 0;
+	for (;probePosition <= headerMap->maxDIB; ++probePosition)
+	{
+		u32 location = (key + probePosition) % tableCap;
+		http_header_bucket* probeBucket = headerMap->buckets + key;
+
+		switch (probeBucket->tag)
+		{
+			case INITIALIZED:
+			{
+				if (stringEql(fieldName, &probeBucket->fieldName))
+				{ 
+					*result = probeBucket->fieldValue;
+					return 1;
+				}
+			}
+			case EMPTY:
+				return 0;
+			case TOMBSTONE:
+				break;
+		}
+	}
+
+	return 0;
+}
+
+i16 delHash(http_header_map* headerMap, u64 digest, string* fieldName)
+{
+	u32 tableCap = headerMap->capacity;
+	u32 key = digest % tableCap;
+	u32 probePosition = headerMap->minDIB;
+	if (probePosition < 0)
+		probePosition = 0;
+
+	for (;probePosition <= headerMap->maxDIB; ++probePosition)
+	{
+		u32 location = (key + probePosition) % tableCap;
+		http_header_bucket* probeBucket = headerMap->buckets + key;
+
+		switch (probeBucket->tag)
+		{
+			case EMPTY:
+			{
+				return 0;
+			}
+			case INITIALIZED:
+			{
+				if (stringEql(fieldName, &probeBucket->fieldName))
+				{ 
+					probeBucket->tag = TOMBSTONE;
+					--headerMap->len;
+					return 1;
+				}
+			}
+			case TOMBSTONE:
+			{
+				break;
+			}
+		}
+	}
+
+	return 0;
 }

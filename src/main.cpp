@@ -1,5 +1,5 @@
 // TODO(louis):
-// 		- rename parser to http
+// 	- compute the hash for common headers we have to check at compile time
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <stdio.h>
@@ -35,7 +35,38 @@ void signalHandler(i32 signalId)
 	}
 }
 
-i32 serve(u16 port)
+http_status_code handleGetRequest(http_header* header)
+{
+	return OK;
+}
+
+http_status_code handlePostRequest(http_header* httpHeader, u8* messageBodyStartPtr, u8* messageBodyEndPtr)
+{
+	string transferCoding;
+	string contentLength;
+	i16 hasTransferCoding = getHash(&transferCoding, &httpHeader->headerMap, 
+								 	TRANSFER_ENCODING_HASH, (string*) &TRANSFER_ENCODING_STRING);
+	i16 hasContentLength = getHash(&contentLength, &httpHeader->headerMap, 
+								   CONTENT_LENGTH_HASH, (string*) &CONTENT_LENGTH_STRING);
+
+	if (hasTransferCoding && hasContentLength)
+		// TODO(louis): send some response
+		return BAD_REQUEST;
+
+	// else if (hasTransferCoding)
+	// {
+	// }
+	// else if (hasContentLength)
+	// {
+	// }
+	// else
+	// {
+	// }
+
+	return OK;
+}
+
+i16 serve(u16 port)
 { 
 	arena_allocator arena;
 	if (init(&arena, 1024 * 1024) == -1)
@@ -43,16 +74,11 @@ i32 serve(u16 port)
 
 	socketDescriptor = socket(AF_INET, SOCK_STREAM, 0);
 	if (socketDescriptor == -1)
-	{
 		return -1;
-
-	}
 
 	struct sockaddr_in socketAddr;
 	if (!inet_pton(AF_INET, "0.0.0.0", &socketAddr.sin_addr))
-	{
 		goto close_server_socket;
-	}
 
 	socketAddr.sin_family = AF_INET;
 	socketAddr.sin_port = htons(port);
@@ -60,14 +86,10 @@ i32 serve(u16 port)
 	if (bind(socketDescriptor, 
 		 	 (struct sockaddr*) &socketAddr, 
 		  	 sizeof(socketAddr)) == -1)
-	{
 		goto close_server_socket;
-	}
 
 	if (listen(socketDescriptor, MAX_N_PENDING_CONNECTIONS) == -1)
-	{
 		goto close_server_socket;
-	}
 
 	http_header httpHeader;
 	// TODO(louis): move this into a constant
@@ -95,13 +117,43 @@ i32 serve(u16 port)
 		{
 			i32 readBytes = read(clientSocketDescriptor, buffer, sizeof(buffer));	
 			if (readBytes <= 0)
+				goto close_client_socket;
+
+			u16 errorCode;
+			u8* messageBodyStartPtr = parseHeader(&errorCode, &httpHeader, buffer, readBytes);
+			if (messageBodyStartPtr == (u8*) -1)
 			{
+				// TODO(louis): replace this with the actual error code
+				const u8* corruptedHeaderResponse = lookupResponse(BAD_REQUEST);
+				write(clientSocketDescriptor, (void*) corruptedHeaderResponse, DEFAULT_RESPONSE_LEN);
 				goto close_client_socket;
 			}
 
-			if (parseHeader(&httpHeader, buffer, readBytes) == -1)
+			string hostHeaderField;
+			if (!getHash(&hostHeaderField, &httpHeader.headerMap, 
+						 HOST_HEADER_HASH, (string*) &HOST_STRING))
 			{
+				const u8* missingHostHeaderResponse = lookupResponse(BAD_REQUEST);
+				write(clientSocketDescriptor, (void*) missingHostHeaderResponse, DEFAULT_RESPONSE_LEN);
 				goto close_client_socket;
+			}
+
+			switch (httpHeader.method)
+			{
+				case GET:
+				{
+					http_status_code statusCode = handleGetRequest(&httpHeader);
+					const u8* response = lookupResponse(statusCode);
+					i16 res = write(clientSocketDescriptor, (void*) response, DEFAULT_RESPONSE_LEN);
+					break;
+				}
+				case POST:
+				{
+					http_status_code statusCode = handlePostRequest(&httpHeader, messageBodyStartPtr, buffer + readBytes);
+					const u8* response = lookupResponse(statusCode);
+					i16 res = write(clientSocketDescriptor, (void*) response, DEFAULT_RESPONSE_LEN);
+					break;
+				}
 			}
 		}
 
@@ -110,9 +162,7 @@ i32 serve(u16 port)
 		if (clientSocketDescriptor >= 0)
 		{
 			if (close(clientSocketDescriptor) == -1)
-			{
 				goto close_server_socket;
-			}
 		}
 	}
 
