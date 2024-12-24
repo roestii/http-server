@@ -15,6 +15,18 @@ i16 init(arena_allocator* result, usize len)
 	return 0;
 } 
 
+i16 subarena(arena_allocator* result, arena_allocator* alloc, usize len)
+{
+	if (alloc->offset + len > alloc->len)
+		return -1;
+
+	result->start = (u8*) alloc->start + alloc->offset;
+	result->offset = 0;
+	result->len = len;
+	alloc->offset += len;
+	return 0;
+}
+
 void reset(arena_allocator* alloc)
 {
 	alloc->offset = 0;
@@ -25,12 +37,12 @@ i16 destroy(arena_allocator* alloc)
 	return munmap(alloc->start, alloc->len);	
 }
 
-void* allocate(arena_allocator* alloc, usize size)
+void* allocate(arena_allocator* alloc, usize len)
 {
-	if (alloc->offset + size > alloc->len)
+	if (alloc->offset + len > alloc->len)
 		return (void*) -1;
 
 	u8* result = (u8*) alloc->start + alloc->offset;
-	alloc->offset += size;
+	alloc->offset += len;
 	return (void*) result;
 }

@@ -7,6 +7,13 @@
 
 constexpr u64 HASH_P = 53;
 constexpr u64 HASH_M = 1e9 + 9;
+constexpr u64 HASH_A = 0x678DDE6F; // knuth recommendation
+
+constexpr u8 HORNER_CONSTANT = 3;
+
+constexpr u32 HASH_TABLE_M = 256; // m = 2^p
+constexpr u32 HASH_TABLE_P = 8;
+constexpr u32 HASH_TABLE_Q = 16; // amount of right shifts
 
 enum bucket_tag
 {
@@ -31,25 +38,30 @@ struct http_header_map
 	u32 maxDIB;
 
 	u32 len;
-	u32 capacity;
-	arena_allocator* alloc;
-	http_header_bucket* buckets;				
+	http_header_bucket buckets[HASH_TABLE_M];				
 };
 
-constexpr u64 comptimeHash(const u8* ptr, usize len)
+constexpr u64 hash(string* value)
 {
-	u64 result = 0;
-	u64 factor = 1;
-	for (int i = 0; i < len; ++i, ++ptr)
+	// NOTE(louis): The caller has to ensure that this function is not called with a string 
+	// of length zero.
+	
+	u32 minLen = HORNER_CONSTANT;
+	if (value->len < minLen)
+		minLen = value->len;
+
+	char* lastPtr = value->ptr + value->len - 1;
+	u64 h = *lastPtr;
+	--lastPtr;
+	for (int i = 0; i < minLen - 1; ++i, --lastPtr)
 	{
-		result = (result + *ptr * factor) % HASH_M;
-		factor *= factor % HASH_M;
+		h = HASH_P * h + *lastPtr;
 	}
 
-	return result;
+	return (h * HASH_A >> HASH_TABLE_Q) & (HASH_TABLE_M - 1);
 }
 
-i16 init(http_header_map*, arena_allocator*, u32);
+void init(http_header_map*);
 void clear(http_header_map*);
 
 i16 insert(http_header_map*, string*, string*);

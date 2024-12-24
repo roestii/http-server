@@ -1,6 +1,6 @@
 #include "mem.h"
 
-void memCpy(u8* dest, u8* src, usize len)
+void memCpy(char* dest, char* src, usize len)
 {
 	for (int i = 0; i < len; ++i, ++dest, ++src)
 	{
@@ -8,7 +8,7 @@ void memCpy(u8* dest, u8* src, usize len)
 	}
 }
 
-bool memEql(u8* a, u8* b, usize len)
+bool memEql(char* a, char* b, usize len)
 {
 	for (int i = 0; i < len; ++i, ++a, ++b)
 	{
@@ -29,7 +29,7 @@ bool stringEql(string* a, string* b)
 	return memEql(a->ptr, b->ptr, a->len);
 }
 
-bool memEqlCrlf(u8* haystack)
+bool memEqlCrlf(char* haystack)
 {
 	// NOTE(louis): the caller has to ensure that the size of the haystack is at least 
 	// as long as GET
@@ -38,7 +38,7 @@ bool memEqlCrlf(u8* haystack)
 }
 
 // TODO(louis): maybe speed this up with vector instruction sets
-bool memEqlGet(u8* haystack)
+bool memEqlGet(char* haystack)
 {
 	// NOTE(louis): the caller has to ensure that the size of the haystack is at least 
 	// as long as GET
@@ -47,7 +47,7 @@ bool memEqlGet(u8* haystack)
 		   && *(haystack + 2) == GET_METHOD_NAME[2];
 }
 
-bool memEqlPost(u8* haystack)
+bool memEqlPost(char* haystack)
 {
 	// NOTE(louis): the caller has to ensure that the size of the haystack is at least 
 	// as long as POST 
@@ -57,7 +57,7 @@ bool memEqlPost(u8* haystack)
 		   && *(haystack + 3) == POST_METHOD_NAME[3];
 }
 
-bool memEqlHttpVersionPrefix(u8* haystack)
+bool memEqlHttpVersionPrefix(char* haystack)
 {
 	// NOTE(louis): the caller has to ensure that the size of the haystack is at least 
 	// as long as POST 
@@ -68,7 +68,7 @@ bool memEqlHttpVersionPrefix(u8* haystack)
 		   && *(haystack + 4) == HTTP_VERSION_PREFIX[4];
 }
 
-u8* memFind2Crlf(u8* haystack, usize haystackLen)
+char* memFind2Crlf(char* haystack, usize haystackLen)
 {
 	for (int i = 0; i <= haystackLen - 2 * CRLF_LEN; ++i, ++haystack)
 	{
@@ -84,7 +84,7 @@ u8* memFind2Crlf(u8* haystack, usize haystackLen)
 	return NULL;
 }
 
-u8* memFindCrlf(u8* haystack, usize haystackLen)
+char* memFindCrlf(char* haystack, usize haystackLen)
 {
 	for (int i = 0; i <= haystackLen - CRLF_LEN; ++i, ++haystack)
 	{
@@ -100,7 +100,7 @@ u8* memFindCrlf(u8* haystack, usize haystackLen)
 
 
 
-u8* memFindChr(u8* haystack, usize haystackLen, u8 needle)
+char* memFindChr(char* haystack, usize haystackLen, u8 needle)
 {
 	for (int i = 0; i < haystackLen; ++i, ++haystack)
 	{
@@ -113,7 +113,7 @@ u8* memFindChr(u8* haystack, usize haystackLen, u8 needle)
 	return NULL;
 }
 
-u8* memFindMem(u8* haystack, usize haystackLen, u8* needle, usize needleLen)
+char* memFindMem(char* haystack, usize haystackLen, char* needle, usize needleLen)
 {
 	for (int i = 0; i <= haystackLen - needleLen; ++i, ++haystack)
 	{

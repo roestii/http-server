@@ -5,9 +5,8 @@
 #include "mem.h"
 
 constexpr u8 MAX_DIGITS_U8 = 3;
-constexpr u8 STATUS_CODE_DIGITS = 3;
 
-const u8* lookupResponse(http_status_code statusCode)
+const char* lookupStatusLine(http_status_code statusCode)
 {
 	// NOTE(louis): The caller has to ensure that the input is in fact a BASIC_RESPONSE. 
 	// Otherwise this is unsafe to call.
@@ -17,11 +16,13 @@ const u8* lookupResponse(http_status_code statusCode)
 		case OK: return OK_RESPONSE;
 		case BAD_REQUEST: return BAD_REQUEST_RESPONSE;
 		case NOT_IMPLEMENTED: return NOT_IMPLEMENTED_RESPONSE;
+		case NOT_FOUND: return NOT_FOUND_RESPONSE;
 		default: __builtin_unreachable();
 	}
 }
 
-u8 strnToU8(u8** firstInvalidPtr, u8* str, u8 strLen)
+// TODO(louis): make this more safe...
+u8 strnToU8(char** firstInvalidPtr, char* str, u8 strLen)
 {
 	u8 digits[MAX_DIGITS_U8] = {0};
 	u8 nDigits = 0;
@@ -51,7 +52,7 @@ u8 strnToU8(u8** firstInvalidPtr, u8* str, u8 strLen)
 	return result;
 }
 
-i16 parseFieldLines(http_header_map* headerMap, u8* headerFieldLineStr, u8* headerFieldLineEndPtr)
+i16 parseFieldLines(http_header_map* headerMap, char* headerFieldLineStr, char* headerFieldLineEndPtr)
 {
 	string fieldName;
 	string fieldValue;
@@ -61,18 +62,18 @@ i16 parseFieldLines(http_header_map* headerMap, u8* headerFieldLineStr, u8* head
 		if (headerFieldLineStr == headerFieldLineEndPtr)
 			return 0;
 
-		u8* nextCrlfPtr = memFindCrlf(headerFieldLineStr, headerFieldLineEndPtr - headerFieldLineStr);
+		char* nextCrlfPtr = memFindCrlf(headerFieldLineStr, headerFieldLineEndPtr - headerFieldLineStr);
 		if (!nextCrlfPtr)
 			return -1;
 
-		u8* colonPtr = memFindChr(headerFieldLineStr, nextCrlfPtr - headerFieldLineStr, ':');
+		char* colonPtr = memFindChr(headerFieldLineStr, nextCrlfPtr - headerFieldLineStr, ':');
 		if (!colonPtr)
 			return -1;
 
 		if (*(colonPtr - 1) == ' ')
 			return -1;
 
-		u8* headerValuePtr = colonPtr + 1;
+		char* headerValuePtr = colonPtr + 1;
 		if (headerValuePtr == nextCrlfPtr)
 			return -1;
 
@@ -92,27 +93,27 @@ i16 parseFieldLines(http_header_map* headerMap, u8* headerFieldLineStr, u8* head
 		if (insert(headerMap, &fieldName, &fieldValue) == -1)
 			return -1;
 
-		headerFieldLineStr = nextCrlfPtr + sizeof(CRLF);
+		headerFieldLineStr = nextCrlfPtr + CRLF_LEN;
 	}		
 
 	return 0;
 }
 
-u8* parseHeader(u16* errorCode, http_header* result, u8* buffer, u32 readBytes)
+i16 parseHttpRequest(u16* errorCode, http_request* result, char* buffer, u32 readBytes)
 {
 	// NOTE(louis): Returns the pointer to the start of the message body if there is any.
-	//
 	// TODO(louis): Introduce proper error handling
-	u8* limit = buffer + readBytes;
-	u8* crlfPointer = memFindCrlf(buffer, readBytes);
+	
+	char* messageEndPtr = buffer + readBytes;
+	char* crlfPointer = memFindCrlf(buffer, readBytes);
 	if (!crlfPointer)
-		return (u8*) -1;
+		return CORRUPTED_HEADER;
 
 	usize requestLineSize = crlfPointer - buffer;
-	u8* requestTargetPtr = memFindChr(buffer, requestLineSize, SP);
+	char* requestTargetPtr = memFindChr(buffer, requestLineSize, SP);
 
 	if (!requestTargetPtr)
-		return (u8*) -1;
+		return CORRUPTED_HEADER;
 
 	usize methodLen = requestTargetPtr - buffer;
 	http_method httpMethod;
@@ -125,7 +126,7 @@ u8* parseHeader(u16* errorCode, http_header* result, u8* buffer, u32 readBytes)
 				result->method = GET;
 			else 
 				// TODO(louis): set the error code.
-				return (u8*) -1;
+				return CORRUPTED_HEADER;
 
 			break;
 		}
@@ -134,71 +135,74 @@ u8* parseHeader(u16* errorCode, http_header* result, u8* buffer, u32 readBytes)
 			if (memEqlPost(buffer)) 
 				result->method = POST;
 			else 
-				// TODO(louis): set the error code.
-				return (u8*) -1;
+				// TODO(louis): set the error code. and move this into a constant
+				return CORRUPTED_HEADER;
 
 			break;
 		}
 		default:
 			// TODO(louis): set the error code.
-			return (u8*) -1;
+			return CORRUPTED_HEADER;
 	}
 
 	++requestTargetPtr;
 	isize remainingSize = crlfPointer - requestTargetPtr;
 	if (remainingSize <= 0)
-		return (u8*) -1;
+		return CORRUPTED_HEADER;
 
-	u8* httpVersionPtr = memFindChr(requestTargetPtr, remainingSize, SP);
+	char* httpVersionPtr = memFindChr(requestTargetPtr, remainingSize, SP);
 	if (!httpVersionPtr)
-		return (u8*) -1;
+		return CORRUPTED_HEADER;
 
 	isize requestTargetLen = httpVersionPtr - requestTargetPtr;
 	if (requestTargetLen <= 0)
-		return (u8*) -1;
+		return CORRUPTED_HEADER;
 
 	result->requestTarget = { requestTargetPtr, requestTargetLen };
 
 	++httpVersionPtr;
 	isize httpVersionLen = crlfPointer - httpVersionPtr;
-	if (httpVersionLen <= 0 || httpVersionLen < sizeof(HTTP_VERSION_PREFIX) + 3)
-		return (u8*) -1;
+	if (httpVersionLen <= 0 || httpVersionLen < HTTP_VERSION_PREFIX_LEN + 3)
+		return CORRUPTED_HEADER;
 
 	if (!memEqlHttpVersionPrefix(httpVersionPtr))
-		return (u8*) -1;
+		return CORRUPTED_HEADER;
 
-	httpVersionPtr += sizeof(HTTP_VERSION_PREFIX);
-	u8* dotPtr; 
+	httpVersionPtr += HTTP_VERSION_PREFIX_LEN;
+	char* dotPtr; 
 	u8 majorVersion = strnToU8(&dotPtr, httpVersionPtr, crlfPointer - httpVersionPtr);
 	if (httpVersionPtr == dotPtr || *dotPtr != '.')
-		return (u8*) -1;
+		return CORRUPTED_HEADER;
 
 	++dotPtr;
 	if (dotPtr >= crlfPointer)
-		return (u8*) -1;
+		return CORRUPTED_HEADER;
 
 	u8 minorVersion = strnToU8(&httpVersionPtr, dotPtr, crlfPointer - dotPtr);
 	if (httpVersionPtr != crlfPointer)
-		return (u8*) -1;
+		return CORRUPTED_HEADER;
 
 	result->version.major = majorVersion;
 	result->version.minor = minorVersion;
 
-	u8* headerFieldLineStartPtr = crlfPointer + sizeof(CRLF);
-	if (headerFieldLineStartPtr >= limit)
-		return (u8*) -1;
+	char* headerFieldLineStartPtr = crlfPointer + CRLF_LEN;
+	if (headerFieldLineStartPtr >= messageEndPtr)
+		return CORRUPTED_HEADER;
 
-	u8* headerFieldLineEndPtr = memFind2Crlf(headerFieldLineStartPtr, limit - headerFieldLineStartPtr);
+	char* headerFieldLineEndPtr = memFind2Crlf(headerFieldLineStartPtr, messageEndPtr - headerFieldLineStartPtr);
 	if (!headerFieldLineEndPtr)
-		return (u8*) -1;
+		return CORRUPTED_HEADER;
 
 	if (parseFieldLines(&result->headerMap, headerFieldLineStartPtr, 
-					 	headerFieldLineEndPtr + sizeof(CRLF)) == -1)
-		return (u8*) -1;
+					 	headerFieldLineEndPtr + CRLF_LEN) == -1)
+		return CORRUPTED_HEADER;
 
-	u8* messageBodyStartPtr = headerFieldLineEndPtr + 2 * sizeof(CRLF);
-	if (messageBodyStartPtr >= limit)
-		return NULL;
+	char* messageBodyStartPtr = headerFieldLineEndPtr + 2 * CRLF_LEN;
+	isize messageBodyLen = messageEndPtr - messageBodyStartPtr;
+	if (messageBodyLen <= 0)
+		result->messageBody = {0};
+	else
+		result->messageBody = { messageBodyStartPtr, messageBodyLen };
 
-	return messageBodyStartPtr;
+	return 0;
 }

@@ -11,6 +11,7 @@ struct arena_allocator
 };
 
 i16 init(arena_allocator*, usize);
+i16 subarena(arena_allocator*, arena_allocator*, usize);
 i16 destroy(arena_allocator*);
 
 void reset(arena_allocator*);

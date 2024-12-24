@@ -5,44 +5,62 @@
 #include "types.h"
 #include "http_header_map.h"
 
+#define CORRUPTED_HEADER -1
+
 constexpr u32 MAX_HTTP_HEADER_SIZE = 8 * 1024;
-constexpr u32 STATUS_CODE_OFFSET = 9; 
+
+constexpr char HTTP_VERSION_1_1[] = "1.1 ";
+constexpr u32 HTTP_VERSION_1_1_LEN = sizeof(HTTP_VERSION_1_1) - 1;
 
 constexpr u16 OK = 200;
 constexpr u16 BAD_REQUEST = 400;
+constexpr u16 NOT_FOUND = 404;
 constexpr u16 NOT_IMPLEMENTED = 501;
 
-constexpr u8 OK_RESPONSE[] = { 'H', 'T', 'T', 'P', '/', '1', '.', '1', ' ', '2', '0', '0', ' ', '\r', '\n', '\r', '\n' };
-constexpr u8 BAD_REQUEST_RESPONSE[] = { 'H', 'T', 'T', 'P', '/', '1', '.', '1', ' ', '4', '0', '0', ' ', '\r', '\n', '\r', '\n' };
-constexpr u8 NOT_IMPLEMENTED_RESPONSE[] = { 'H', 'T', 'T', 'P', '/', '1', '.', '1', ' ', '5', '0', '1', ' ', '\r', '\n', '\r', '\n' };
+// TODO(louis): implement a formatter
+constexpr char OK_RESPONSE[] = "HTTP/1.1 200 ";
+constexpr char BAD_REQUEST_RESPONSE[] = "HTTP/1.1 400 ";
+constexpr char NOT_FOUND_RESPONSE[] = "HTTP/1.1 404 ";
+constexpr char NOT_IMPLEMENTED_RESPONSE[] = "HTTP/1.1 501 ";
 
-constexpr u16 DEFAULT_RESPONSE_LEN = sizeof(OK_RESPONSE);
+constexpr char ZERO_LEN[] = "0";
+constexpr string ZERO_LEN_STRING = 
+{
+	(char*) ZERO_LEN,
+	sizeof(ZERO_LEN) - 1
+};
 
-constexpr u8 TRANSFER_ENCODING_HEADER_NAME[] = { 'T', 'r', 'a', 'n', 's', 'f', 'e', 'r', '-', 'E', 'n', 'c', 'o', 'd', 'i', 'n', 'g' };
-constexpr u8 CONTENT_LENGTH_HEADER_NAME[] = { 'C', 'o', 'n', 't', 'e', 'n', 't', '-', 'L', 'e', 'n', 'g', 't', 'h' };
-constexpr u8 HOST_HEADER_NAME[] = { 'H', 'o', 's', 't' };
+constexpr u32 DEFAULT_RESPONSE_LEN = sizeof(OK_RESPONSE) - 1;
+
+constexpr char TRANSFER_ENCODING_HEADER_NAME[] = "Transfer-Encoding";
+constexpr char CONTENT_LENGTH_HEADER_NAME[] = "Content-Length"; 
+constexpr char HOST_HEADER_NAME[] = "Host";
+
+constexpr u32 TRANSFER_ENCODING_HEADER_LEN = sizeof(TRANSFER_ENCODING_HEADER_NAME) - 1;
+constexpr u32 CONTENT_LENGTH_HEADER_LEN = sizeof(CONTENT_LENGTH_HEADER_NAME) - 1; 
+constexpr u32 HOST_HEADER_LEN = sizeof(HOST_HEADER_NAME) - 1;
 
 constexpr string TRANSFER_ENCODING_STRING = 
 {
-	(u8*) TRANSFER_ENCODING_HEADER_NAME,
-	sizeof(TRANSFER_ENCODING_HEADER_NAME)
+	(char*) TRANSFER_ENCODING_HEADER_NAME,
+	TRANSFER_ENCODING_HEADER_LEN,
 };
 
 constexpr string CONTENT_LENGTH_STRING = 
 {
-	(u8*) CONTENT_LENGTH_HEADER_NAME,
-	sizeof(CONTENT_LENGTH_HEADER_NAME)
+	(char*) CONTENT_LENGTH_HEADER_NAME,
+	CONTENT_LENGTH_HEADER_LEN,
 };
 
 constexpr string HOST_STRING = 
 {
-	(u8*) HOST_HEADER_NAME,
-	sizeof(HOST_HEADER_NAME)
+	(char*) HOST_HEADER_NAME,
+	HOST_HEADER_LEN,
 };
 
-constexpr u64 TRANSFER_ENCODING_HASH = comptimeHash(TRANSFER_ENCODING_HEADER_NAME, sizeof(TRANSFER_ENCODING_HEADER_NAME));
-constexpr u64 CONTENT_LENGTH_HASH = comptimeHash(CONTENT_LENGTH_HEADER_NAME, sizeof(CONTENT_LENGTH_HEADER_NAME));
-constexpr u64 HOST_HEADER_HASH = comptimeHash(HOST_HEADER_NAME, sizeof(HOST_HEADER_NAME));
+constexpr u64 TRANSFER_ENCODING_HASH = hash((string*) &TRANSFER_ENCODING_STRING);
+constexpr u64 CONTENT_LENGTH_HASH = hash((string*) &CONTENT_LENGTH_STRING);
+constexpr u64 HOST_HEADER_HASH = hash((string*) &HOST_STRING);
 
 typedef u16 http_status_code;
 
@@ -58,14 +76,25 @@ struct http_version
 	u8 minor;
 };
 
-struct http_header 
+struct http_request
 {
 	http_method method;
 	string requestTarget;
 	http_version version;
 	http_header_map headerMap;
+	string messageBody;
 };
 
-u8* parseHeader(u16* errorCode, http_header*, u8*, u32);
-const u8* lookupResponse(http_status_code);
+struct http_response 
+{
+	http_status_code statusCode;
+	char* reason;
+	http_version version;
+	http_header_map headerMap;
+	string messageBody;
+};
+
+i16 parseHttpRequest(u16* errorCode, http_request*, char*, u32);
+const char* lookupStatusLine(http_status_code);
+i16 serializeResponse(string*, http_response*, arena_allocator*);
 #endif

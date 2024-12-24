@@ -4,38 +4,46 @@
 #include "types.h"
 #include <stddef.h>
 
-constexpr u8 HTTP_VERSION_PREFIX[5] = { 'H', 'T', 'T', 'P', '/' };
-
-const u8 CRLF[2] = { '\r', '\n' };
-constexpr u32 CRLF_LEN = sizeof(CRLF);
-
-const u8 SP = ' ';
-
-constexpr u8 GET_METHOD_NAME[3] = { 'G', 'E', 'T' };
-constexpr u8 POST_METHOD_NAME[4] = { 'P', 'O', 'S', 'T' };
-
-constexpr u32 GET_METHOD_NAME_LEN = sizeof(GET_METHOD_NAME);
-constexpr u32 POST_METHOD_NAME_LEN = sizeof(POST_METHOD_NAME);
-
 struct string 
 {
-	u8* ptr;
+	char* ptr;
 	isize len;
 };
 
+constexpr char HTTP_VERSION_PREFIX[] = "HTTP/";
+constexpr u32 HTTP_VERSION_PREFIX_LEN = sizeof(HTTP_VERSION_PREFIX) - 1;
+
+constexpr string HTTP_VERSION_PREFIX_STRING =
+{
+	(char*) HTTP_VERSION_PREFIX,
+	HTTP_VERSION_PREFIX_LEN
+};
+
+constexpr char CRLF[] = "\r\n";
+constexpr u32 CRLF_LEN = sizeof(CRLF) - 1;
+
+constexpr char SP = ' ';
+
+constexpr char GET_METHOD_NAME[] = "GET";
+constexpr char POST_METHOD_NAME[] = "POST";
+
+constexpr u32 GET_METHOD_NAME_LEN = sizeof(GET_METHOD_NAME) - 1;
+constexpr u32 POST_METHOD_NAME_LEN = sizeof(POST_METHOD_NAME) - 1;
+
+
 bool stringEql(string*, string*);
 
-bool memEql(u8*, u8*, usize);
-bool memEqlGet(u8*);
-bool memEqlPost(u8*);
-bool memEqlCrlf(u8*);
-bool memEqlHttpVersionPrefix(u8*);
+bool memEql(char*, char*, usize);
+bool memEqlGet(char*);
+bool memEqlPost(char*);
+bool memEqlCrlf(char*);
+bool memEqlHttpVersionPrefix(char*);
 
-u8* memFindChr(u8*, usize, u8);
-u8* memFindCrlf(u8*, usize);
-u8* memFind2Crlf(u8*, usize);
-u8* memFindMem(u8*, usize, u8*, usize);
+char* memFindChr(char*, usize, u8);
+char* memFindCrlf(char*, usize);
+char* memFind2Crlf(char*, usize);
+char* memFindMem(char*, usize, char*, usize);
 
-void memCpy(u8*, u8*, usize);
+void memCpy(char*, char*, usize);
 
 #endif
