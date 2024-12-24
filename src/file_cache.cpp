@@ -71,6 +71,7 @@ i16 buildStaticCache(file_cache* result, arena_allocator* alloc)
 		memCpy(currentHandle->fileName, currentEntry->d_name, FILE_PATH_LEN);
 		currentHandle->contentHandle = contentHandle;
 		currentHandle->fileSize = fileStat.st_size;
+		++currentHandle;
 		++result->len;
 	}
 

@@ -1,6 +1,7 @@
 // TODO(louis):
 // 	- compute the hash for common headers we have to check at compile time
 // 	- introduce proper error handling using the rfc
+// 	- fix the server closing
 
 #include <sys/socket.h>
 #include <arpa/inet.h>
