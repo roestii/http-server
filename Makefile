@@ -1,72 +1,44 @@
-http_server: main.o http.o mem.o arena_allocator.o http_header_map.o string.o file_cache.o
-ifdef DEBUG_MODE
-	gcc -DDEBUG_MODE=1 -g -o http_server main.o http.o mem.o arena_allocator.o http_header_map.o string.o file_cache.o
-else
-	gcc -o http_server main.o http.o mem.o arena_allocator.o http_header_map.o string.o file_cache.o
+CFLAGS = 
+
+ifeq ($(TLS), 1)
+CFLAGS += -DTLS=1
+endif 
+
+ifeq ($(DEBUG_MODE), 1)
+CFLAGS += -DDEBUG_MODE=1
+CFLAGS += -g
 endif
+
+
+http_server: main.o http.o mem.o arena_allocator.o http_header_map.o string.o file_cache.o
+	gcc $(CFLAGS) -o http_server main.o http.o mem.o arena_allocator.o http_header_map.o string.o file_cache.o
 
 mem.o: src/mem.cpp src/mem.h src/types.h
-ifdef DEBUG_MODE
-	gcc -DDEBUG_MODE=1 -g -c src/mem.cpp
-else
-	gcc -c src/mem.cpp
-endif
+	gcc $(CFLAGS) -c src/mem.cpp
 
 worker_queue.o: src/worker_queue.cpp src/worker_queue.h src/types.h
-ifdef DEBUG_MODE
-	gcc -DDEBUG_MODE=1 -g -c src/worker_queue.cpp
-else
-	gcc -c src/worker_queue.cpp
-endif
+	gcc $(CFLAGS) -c src/worker_queue.cpp
 
 string.o: src/string.cpp src/string.h src/types.h
-ifdef DEBUG_MODE
-	gcc -DDEBUG_MODE=1 -g -c src/string.cpp
-else
-	gcc -c src/string.cpp
-endif
+	gcc $(CFLAGS) -c src/string.cpp
 
 file_cache.o: src/file_cache.cpp src/file_cache.h src/types.h
-ifdef DEBUG_MODE
-	gcc -DDEBUG_MODE=1 -g -c src/file_cache.cpp
-else
-	gcc -c src/file_cache.cpp
-endif
+	gcc $(CFLAGS) -c src/file_cache.cpp
 
 arena_allocator.o: src/arena_allocator.cpp src/arena_allocator.h src/types.h
-ifdef DEBUG_MODE
-	gcc -DDEBUG_MODE=1 -g -c src/arena_allocator.cpp
-else
-	gcc -c src/arena_allocator.cpp
-endif
+	gcc $(CFLAGS) -c src/arena_allocator.cpp
 
 stack_allocator.o: src/stack_allocator.cpp src/stack_allocator.h src/types.h
-ifdef DEBUG_MODE
-	gcc -DDEBUG_MODE=1 -g -c src/stack_allocator.cpp
-else
-	gcc -c src/stack_allocator.cpp
-endif
+	gcc $(CFLAGS) -c src/stack_allocator.cpp
 
 http_header_map.o: src/http_header_map.cpp src/http_header_map.h src/types.h src/mem.h
-ifdef DEBUG_MODE
-	gcc -DDEBUG_MODE=1 -g -c src/http_header_map.cpp
-else
-	gcc -c src/http_header_map.cpp
-endif
+	gcc $(CFLAGS) -c src/http_header_map.cpp
 
 http.o: src/http.cpp src/http.h src/mem.h src/types.h
-ifdef DEBUG_MODE
-	gcc -DDEBUG_MODE=1 -g -c src/http.cpp 
-else
-	gcc -c src/http.cpp
-endif
+	gcc $(CFLAGS) -c src/http.cpp 
 
 main.o: src/main.cpp src/http.h src/types.h src/file_cache.h src/arena_allocator.h src/http_header_map.h
-ifdef DEBUG_MODE
-	gcc -DDEBUG_MODE=1 -g -c src/main.cpp
-else
-	gcc -c src/main.cpp
-endif
+	gcc $(CFLAGS) -c src/main.cpp
 
 clean:
 	rm *.o http_server
