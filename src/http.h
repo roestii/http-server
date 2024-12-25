@@ -94,6 +94,7 @@ struct http_response
 	string messageBody;
 };
 
+void initEmptyResponse(http_response*, http_status_code);
 i16 parseHttpRequest(u16* errorCode, http_request*, char*, u32);
 const char* lookupStatusLine(http_status_code);
 i16 serializeResponse(string*, http_response*, arena_allocator*);

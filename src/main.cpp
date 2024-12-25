@@ -2,6 +2,9 @@
 // 	- compute the hash for common headers we have to check at compile time
 // 	- introduce proper error handling using the rfc
 // 	- fix the server closing
+// 	- implement some transfer encoding, for the response maybe... (but this might not actually be worth it)
+// 	- make the server multithreaded
+// 	- revisit the closing of the server
 
 #include <sys/socket.h>
 #include <arpa/inet.h>
@@ -10,6 +13,8 @@
 #include <errno.h>
 #include <signal.h>
 #include <assert.h>
+#include <netdb.h>
+#include <pthread.h>
 
 #include "http_header_map.h"
 #include "arena_allocator.h"
@@ -18,28 +23,27 @@
 #include "string.h"
 #include "http.h"
 
+constexpr u8 N_THREADS = 8;
 constexpr u16 MAX_N_PENDING_CONNECTIONS = 128;
+constexpr u16 PORT = 8080;
+
 constexpr usize MEMORY_LIMIT = 10 * 1024 * 1024;
 constexpr usize FILE_CACHE_LIMIT = 8 * 1024 * 1024;
+constexpr usize THREAD_LOCAL_MEMORY = (MEMORY_LIMIT - FILE_CACHE_LIMIT) / N_THREADS;
 
-i32 socketDescriptor = -1;
-i32 clientSocketDescriptor = -1;
+pthread_mutex_t killMutex;
+pthread_cond_t killSignal;
 
 void signalHandler(i32 signalId)
 {
 	if (signalId == SIGINT)
 	{
-		if (clientSocketDescriptor >= 0)
-		{
-			close(clientSocketDescriptor);
-			clientSocketDescriptor = -1;
-		}
-
-		if (socketDescriptor >= 0)
-		{
-			close(socketDescriptor);
-			socketDescriptor = -1;
-		}
+		if (pthread_mutex_lock(&killMutex) != 0)
+			return;
+		if (pthread_cond_signal(&killSignal) != 0)
+			return;
+		if (pthread_mutex_unlock(&killMutex) != 0)
+			return;
 	}
 }
 
@@ -120,16 +124,12 @@ void handleGetRequest(http_response* result, http_request* request,
 		insert(&result->headerMap, (string*) &CONTENT_LENGTH_STRING, &contentLengthValue);
 	}
 	else
-	{
-		// TODO(louis): figure out the appropriate stats code
-		result->statusCode = NOT_FOUND;
-		result->reason = NULL;
-		result->messageBody = {0};
-	}
+		initEmptyResponse(result, NOT_FOUND);
 }
 
 void handlePostRequest(http_response* result, http_request* request, arena_allocator* alloc)
 {
+	// NOTE(louis): the caller has to ensure that the headerMap of the result was initialized.
 	string transferCoding;
 	string contentLength;
 	i16 hasTransferCoding = getHash(&transferCoding, &request->headerMap, 
@@ -138,82 +138,52 @@ void handlePostRequest(http_response* result, http_request* request, arena_alloc
 								   CONTENT_LENGTH_HASH, (string*) &CONTENT_LENGTH_STRING);
 
 	if (hasTransferCoding && hasContentLength)
-	{
 		// TODO(louis): send some response
 		// The version and the header map should already be initialized.
-		result->statusCode = BAD_REQUEST;
-		result->reason = NULL;
-		result->messageBody = {0};
-	}
+		initEmptyResponse(result, BAD_REQUEST);
 	else if (hasTransferCoding)
-	{
-		result->statusCode = BAD_REQUEST;
-		result->reason = NULL;
-		result->messageBody = {0};
-	}
+		initEmptyResponse(result, NOT_IMPLEMENTED);
 	else if (hasContentLength)
 	{
 		string messageBody = request->messageBody;
-		// u32 contentLengthInt = stringToU32(&contentLength);
-		// if (contentLengthInt > messageBody.len)
-		// {
-		// 	result->statusCode = BAD_REQUEST;
-		// 	result->reason = NULL;
-		// 	return;
-		// }
+		u64 contentLengthInt;
+		if (strToU64(&contentLengthInt, &contentLength) == -1)
+		{
+			initEmptyResponse(result, BAD_REQUEST);
+			return;
+		}
+
+		if (contentLengthInt > messageBody.len)
+		{
+			initEmptyResponse(result, BAD_REQUEST);
+			return;
+		}
 		
-		result->statusCode = OK;
-		result->reason = NULL;
-		result->messageBody = {0};
+		initEmptyResponse(result, OK);
 		insert(&result->headerMap, (string*) &CONTENT_LENGTH_STRING, (string*) &ZERO_LEN_STRING);
 	}
 	else
-	{
-		result->statusCode = BAD_REQUEST;
-		result->reason = NULL;
-		result->messageBody = {0};
-	}
+		initEmptyResponse(result, BAD_REQUEST);
 }
 
-i16 serve(u16 port)
-{ 
-	arena_allocator programMemory;
-	if (init(&programMemory, MEMORY_LIMIT) == -1)
-		return -1;
+struct handle_request_args 
+{
+	file_cache* fileCache;
+	arena_allocator* requestLocalMemory;
+	i32 socketDescriptor;
+};
 
-	arena_allocator requestLocalMemory;
-	if (subarena(&requestLocalMemory, &programMemory, MEMORY_LIMIT - FILE_CACHE_LIMIT) == -1)
-		return -1;
-
-	arena_allocator fileCacheMemory;
-	if (subarena(&fileCacheMemory, &programMemory, FILE_CACHE_LIMIT) == -1)
-		return -1;
-
-	socketDescriptor = socket(AF_INET, SOCK_STREAM, 0);
-	if (socketDescriptor == -1)
-		return -1;
-
-	struct sockaddr_in socketAddr;
-	if (!inet_pton(AF_INET, "0.0.0.0", &socketAddr.sin_addr))
-		goto close_server_socket;
-
-	socketAddr.sin_family = AF_INET;
-	socketAddr.sin_port = htons(port);
-
-	if (bind(socketDescriptor, 
-		 	 (struct sockaddr*) &socketAddr, 
-		  	 sizeof(socketAddr)) == -1)
-		goto close_server_socket;
-
-	if (listen(socketDescriptor, MAX_N_PENDING_CONNECTIONS) == -1)
-		goto close_server_socket;
+void* handleRequests(void* args)
+{
+	handle_request_args* handleRequestArgs = (handle_request_args*) args;
+	file_cache* fileCache = handleRequestArgs->fileCache;
+	arena_allocator* requestLocalMemory = handleRequestArgs->requestLocalMemory;
+	i32 socketDescriptor = handleRequestArgs->socketDescriptor;
 
 	http_request request;
+	http_response response;
 	init(&request.headerMap);
-	
-	file_cache fileCache;
-	if (buildStaticCache(&fileCache, &fileCacheMemory) == -1)
-		return -1;
+	init(&response.headerMap);
 
 	for (;;)
 	{
@@ -221,18 +191,15 @@ i16 serve(u16 port)
 		struct sockaddr_in clientSocketAddr;
 		socklen_t addrlen;
 		
-		clientSocketDescriptor = accept(socketDescriptor, (struct sockaddr*) &clientSocketAddr, &addrlen);
+		i32 clientSocketDescriptor = accept(socketDescriptor, (struct sockaddr*) &clientSocketAddr, &addrlen);
 		if (clientSocketDescriptor == -1)
 			// TODO(louis): Implement some proper error handling (see man page).
-			goto close_server_socket;
+			continue;
 
 		// TODO(louis): maybe only read if poll returns a positive number (something is there to read). 
 		// This might help handling multiple connections on one thread.
 		
 		char buffer[MAX_HTTP_HEADER_SIZE];
-		http_response response;
-		init(&response.headerMap);
-
 		for (;;)
 		{
 			i32 readBytes = read(clientSocketDescriptor, buffer, MAX_HTTP_HEADER_SIZE);	
@@ -261,7 +228,7 @@ i16 serve(u16 port)
 			{
 				case GET:
 				{
-					handleGetRequest(&response, &request, &fileCache, &requestLocalMemory);
+					handleGetRequest(&response, &request, fileCache, requestLocalMemory);
 	   				if (writeResponse(clientSocketDescriptor, &response) == -1)
 						goto close_client_socket;
 
@@ -269,7 +236,7 @@ i16 serve(u16 port)
 				}
 				case POST:
 				{
-					handlePostRequest(&response, &request, &requestLocalMemory);
+					handlePostRequest(&response, &request, requestLocalMemory);
 	   				if (writeResponse(clientSocketDescriptor, &response) == -1)
 						goto close_client_socket;
 
@@ -279,40 +246,150 @@ i16 serve(u16 port)
 		}
 
 	close_client_socket:
-		reset(&requestLocalMemory);
+		reset(requestLocalMemory);
 		clear(&request.headerMap);
 		clear(&response.headerMap);
 
 		if (clientSocketDescriptor >= 0) 
 			close(clientSocketDescriptor);
 	}
+}
 
-close_server_socket:
-	// TODO(louis): make sure that we really call munmap on SIGINT
-	// and make sure to close all client connections
-	destroy(&programMemory);
-	if (socketDescriptor >= 0)
-	{
-		close(socketDescriptor);
+i16 serve(u16 port)
+{ 
+	i16 retval = 0;
+	struct protoent* tcpProto = getprotobyname("tcp");
+	if(!tcpProto)
 		return -1;
+
+	arena_allocator programMemory;
+	if (init(&programMemory, MEMORY_LIMIT) == -1)
+		return -1;
+
+	arena_allocator fileCacheMemory;
+	if (subarena(&fileCacheMemory, &programMemory, FILE_CACHE_LIMIT) == -1)
+		return -1;
+
+	i32 socketDescriptor = socket(AF_INET, SOCK_STREAM, 0);
+	if (socketDescriptor == -1)
+		return -1;
+
+	i32 optval = 1;
+	struct sockaddr_in socketAddr;
+	if (!inet_pton(AF_INET, "0.0.0.0", &socketAddr.sin_addr))
+	{
+		retval = -1;
+		goto server_clean_up;
 	}
 
-	return 0;
+	socketAddr.sin_family = AF_INET;
+	socketAddr.sin_port = htons(port);
+
+#if DEBUG_MODE 
+	if (setsockopt(socketDescriptor, SOL_SOCKET, 
+			   	   SO_REUSEADDR, &optval, sizeof(optval)) == -1)
+	{
+		retval = -1;
+		goto server_clean_up;
+	}
+#endif
+
+	if (bind(socketDescriptor, 
+		 	 (struct sockaddr*) &socketAddr, 
+		  	 sizeof(socketAddr)) == -1)
+	{
+		retval = -1;
+		goto server_clean_up;
+	}
+
+	if (listen(socketDescriptor, MAX_N_PENDING_CONNECTIONS) == -1)
+	{
+		retval = -1;
+		goto server_clean_up;
+	}
+
+	{
+		file_cache fileCache;
+		if (buildStaticCache(&fileCache, &fileCacheMemory) == -1)
+		{
+			retval = -1;
+			goto server_clean_up;
+		}
+
+		pthread_t threadHandles[N_THREADS];
+		arena_allocator requestLocalMemory[N_THREADS];
+		handle_request_args workerArgs[N_THREADS];
+
+		pthread_t* currentThreadHandle = threadHandles;
+		arena_allocator* currentAlloc = requestLocalMemory;
+		handle_request_args* currentArg = workerArgs;
+		for (int i = 0; 
+			 i < N_THREADS; 
+			 ++i, ++currentThreadHandle, ++currentAlloc, ++currentArg)
+		{
+			if (subarena(currentAlloc, &programMemory, THREAD_LOCAL_MEMORY) == -1)
+			{
+				retval = -1;
+				goto server_clean_up;
+			}
+
+			currentArg->fileCache = &fileCache;
+			currentArg->socketDescriptor = socketDescriptor;
+			currentArg->requestLocalMemory = currentAlloc;
+
+			if (pthread_create(currentThreadHandle, NULL, handleRequests, (void*) currentArg) != 0)
+			{
+				retval = -1;
+				goto server_clean_up;
+			}
+		}
+
+		if (pthread_cond_wait(&killSignal, &killMutex) != 0)
+		{
+			retval = -1;
+			goto server_clean_up;
+		}
+
+		for (int i = 0; i < N_THREADS; ++i)
+		{
+			if (pthread_kill(threadHandles[i], 0) != 0)
+				retval = -1;
+		}
+	}
+
+server_clean_up:
+	if (close(socketDescriptor) == -1)
+		retval = -1;
+
+	destroy(&programMemory);
+	return retval;
 }
 
 i32 main(i32 argc, char** argv)
 {
+	if (pthread_mutex_init(&killMutex, NULL) != 0)
+		return -1;
+	if (pthread_mutex_lock(&killMutex) != 0)
+		return -1;
+	if (pthread_cond_init(&killSignal, NULL) != 0)
+		return -1;
+
 	if (signal(SIGINT, signalHandler) == SIG_ERR) 
 	{
 		fprintf(stderr, "Error while setting signal handler: %d\n", errno);
 		return -1;
 	}
 
-	if (serve(8080) == -1)
-	{
-		fprintf(stderr, "Got some error: %d\n", errno);
-		return -1;
-	}
+	i16 retval = 0;
+	if (serve(PORT) == -1)
+		retval = -1;
 
-	return 0;
+	if (pthread_cond_destroy(&killSignal) != 0)
+		retval = -1;
+	if (pthread_mutex_unlock(&killMutex) != 0)
+		return -1;
+	if (pthread_mutex_destroy(&killMutex) != 0)
+		return -1;
+
+	return retval;
 }

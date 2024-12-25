@@ -18,3 +18,21 @@ void u64ToStr(string* result, arena_allocator* alloc, u64 x)
 	result->ptr = buffer;
 	result->len = nDecimals;
 }
+
+i16 strToU64(u64* result, string* str)
+{
+	u64 res = 0;
+	u64 factor = 1;
+	char* currentChar = str->ptr + str->len - 1;
+	for (;currentChar >= str->ptr; --currentChar, factor *= 10)
+	{
+	  	u8 digit = *currentChar - '0';
+		if (digit < 0 || digit > 9)
+			return -1;
+
+		res += factor * digit;
+	}
+
+	*result = res;
+	return 0;
+}

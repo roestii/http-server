@@ -6,6 +6,13 @@
 
 constexpr u8 MAX_DIGITS_U8 = 3;
 
+void initEmptyResponse(http_response* result, http_status_code statusCode)
+{
+	result->statusCode = statusCode;
+	result->reason = NULL;
+	result->messageBody = {0};
+}
+
 const char* lookupStatusLine(http_status_code statusCode)
 {
 	// NOTE(louis): The caller has to ensure that the input is in fact a BASIC_RESPONSE. 
