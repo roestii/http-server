@@ -36,3 +36,16 @@ i16 strToU64(u64* result, string* str)
 	*result = res;
 	return 0;
 }
+
+i16 strnCpy(char* dest, char* src, usize n)
+{
+	for (int i = 0; i < n; ++i, ++src, ++dest)
+	{
+		if (*src == '\0')
+			return i;
+
+		*dest = *src;
+	}
+
+	return -1;
+}

@@ -2,6 +2,7 @@ CFLAGS =
 
 ifeq ($(TLS), 1)
 CFLAGS += -DTLS=1
+CFLAGS += -lssl
 endif 
 
 ifeq ($(DEBUG_MODE), 1)

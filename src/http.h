@@ -101,8 +101,22 @@ struct http_response
 	string messageBody;
 };
 
+struct buffered_response_writer
+{
+	char buffer[MAX_HTTP_MESSAGE_LEN];
+	usize nRemaining;
+	usize offset;
+};
+
 void initEmptyResponse(http_response*, http_status_code);
 i16 parseHttpRequest(u16* errorCode, http_request*, char*, u32);
 const char* lookupStatusLine(http_status_code);
 i16 serializeResponse(string*, http_response*, arena_allocator*);
+
+void init(buffered_response_writer*);
+void reset(buffered_response_writer*);
+i16 pushChar(buffered_response_writer*, char);
+i16 pushStr(buffered_response_writer*, char*);
+i16 pushString(buffered_response_writer*, string*);
+
 #endif

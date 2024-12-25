@@ -5,7 +5,9 @@
 // 	- make the server multithreaded
 // 	- parsing of the request target
 // 	- obsolete line folding
-// 	- what if the Content-Length + the header size exceeds 8000 bytes. should we just return message too large?
+// 	- connection management (close messages and timeouts) -> this would require concurrency
+// 	- logging 
+// 	- afl fuzzing
 
 #include <sys/socket.h>
 #include <arpa/inet.h>
@@ -16,6 +18,10 @@
 #include <assert.h>
 #include <netdb.h>
 #include <pthread.h>
+
+#if TLS
+#include <openssl/ssl.h>
+#endif
 
 #include "http_header_map.h"
 #include "arena_allocator.h"
@@ -32,8 +38,19 @@ constexpr usize MEMORY_LIMIT = 10 * 1024 * 1024;
 constexpr usize FILE_CACHE_LIMIT = 8 * 1024 * 1024;
 constexpr usize THREAD_LOCAL_MEMORY = (MEMORY_LIMIT - FILE_CACHE_LIMIT) / N_THREADS;
 
+constexpr char PRIVATE_KEY_PATH[] = "key.pem";
+constexpr char CERT_PATH[] = "cert.pem";
+
 pthread_mutex_t killMutex;
 pthread_cond_t killSignal;
+
+#if TLS
+#define read(a, b, c) SSL_read(a, b, c)
+#define write(a, b, c) SSL_write(a, b, c)
+typedef SSL* write_handle; 
+#else
+typedef i32 write_handle;
+#endif
 
 void signalHandler(i32 signalId)
 {
@@ -48,21 +65,17 @@ void signalHandler(i32 signalId)
 	}
 }
 
-i16 writeResponse(i32 fd, http_response* response)
+i16 writeResponse(write_handle wh, http_response* response, buffered_response_writer* writer)
 {
-	FILE* socketStream = fdopen(fd, "w");
-	if (!socketStream)
-		return -1;
-	
-	const char* statusLine = lookupStatusLine(response->statusCode);
-	if (fputs(statusLine, socketStream) == EOF)
+	char* statusLine = (char*) lookupStatusLine(response->statusCode);
+	if (pushStr(writer, statusLine) == -1)
 		return -1;
 
 	char* reason = response->reason;
-	if (reason && fputs(reason, socketStream) == EOF)
+	if (reason && pushStr(writer, reason) == -1)
 		return -1;
 
-	if (fwrite((void*) CRLF, sizeof(char), CRLF_LEN, socketStream) != CRLF_LEN)
+	if (pushStr(writer, (char*) CRLF) == -1)
 		return -1;
 
 	// TODO(louis): consider making this a list in the future
@@ -76,29 +89,25 @@ i16 writeResponse(i32 fd, http_response* response)
 
 		string fieldName = currentBucket->fieldName;
 		string fieldValue = currentBucket->fieldValue;
-		if (fwrite((void*) fieldName.ptr, sizeof(char), 
-			 		fieldName.len, socketStream) != fieldName.len)
+		if (pushString(writer, &fieldName) == -1)
 			return -1;
-		if (fputc(':', socketStream) != ':')
+		if (pushChar(writer, ':') == -1)
 			return -1;
-		if (fwrite((void*) fieldValue.ptr, sizeof(char), fieldValue.len, socketStream) != fieldValue.len)
+		if (pushString(writer, &fieldValue) == -1)
 			return -1;
-		if (fwrite((void*) CRLF, sizeof(char), CRLF_LEN, socketStream) != CRLF_LEN)
+		// TODO(louis): discarding the const here, might cause performance issues.
+		if (pushStr(writer, (char*) CRLF) == -1)
 			return -1;
 	}
 
-	if (fwrite((void*) CRLF, sizeof(char), CRLF_LEN, socketStream) != CRLF_LEN)
+	if (pushStr(writer, (char*) CRLF) == -1)
 		return -1;
 
 	string messageBody = response->messageBody;
-	if (messageBody.ptr)
-	{
-		if (fwrite((void*) messageBody.ptr, sizeof(char), 
-			 		messageBody.len, socketStream) != messageBody.len)
-			return -1;
-	}
+	if (messageBody.ptr && pushString(writer, &messageBody) == -1)
+		return -1;
 	
-	if (fclose(socketStream) == EOF)
+	if (write(wh, writer->buffer, writer->offset) == -1)
 		return -1;
 
 	return 0;
@@ -172,6 +181,9 @@ struct handle_request_args
 	file_cache* fileCache;
 	arena_allocator* requestLocalMemory;
 	i32 socketDescriptor;
+#if TLS
+	SSL_CTX* ctx;
+#endif
 };
 
 void* handleRequests(void* args)
@@ -181,6 +193,11 @@ void* handleRequests(void* args)
 	arena_allocator* requestLocalMemory = handleRequestArgs->requestLocalMemory;
 	i32 socketDescriptor = handleRequestArgs->socketDescriptor;
 
+#if TLS
+	SSL_CTX* ctx = handleRequestArgs->ctx;
+	SSL* ssl = NULL;
+#endif
+
 	http_request request;
 	http_response response;
 	init(&request.headerMap);
@@ -189,6 +206,7 @@ void* handleRequests(void* args)
 	for (;;)
 	{
 		// TODO(louis): spawn multiple threads that can accept and handle connections.
+		i32 readBytes;
 		struct sockaddr_in clientSocketAddr;
 		socklen_t addrlen;
 		
@@ -197,17 +215,38 @@ void* handleRequests(void* args)
 			// TODO(louis): Implement some proper error handling (see man page).
 			continue;
 
-		char buffer[MAX_HTTP_MESSAGE_LEN];
-		i32 readBytes = read(clientSocketDescriptor, buffer, MAX_HTTP_HEADER_LEN);	
+#if TLS
+		ssl = SSL_new(ctx);
+		if (!SSL_set_fd(ssl, clientSocketDescriptor))
+			goto close_client_socket;
+
+		if (SSL_accept(ssl) <= 0)
+			goto close_client_socket;
+#endif
+
+		char requestBuffer[MAX_HTTP_MESSAGE_LEN];
+
+		buffered_response_writer writer;
+		init(&writer);
+#if TLS
+		readBytes = read(ssl, requestBuffer, MAX_HTTP_HEADER_LEN);	
+#else
+		readBytes = read(clientSocketDescriptor, requestBuffer, MAX_HTTP_HEADER_LEN);	
+#endif
+
 		if (readBytes <= 0)
 			goto close_client_socket;
 
 		u16 errorCode;
-		if (parseHttpRequest(&errorCode, &request, buffer, readBytes) == CORRUPTED_HEADER)
+		if (parseHttpRequest(&errorCode, &request, requestBuffer, readBytes) == CORRUPTED_HEADER)
 		{
 			// TODO(louis): replace this with the actual error code
 			const char* corruptedHeaderResponse = lookupStatusLine(BAD_REQUEST);
+#if TLS
+			write(ssl, (void*) corruptedHeaderResponse, DEFAULT_RESPONSE_LEN);
+#else
 			write(clientSocketDescriptor, (void*) corruptedHeaderResponse, DEFAULT_RESPONSE_LEN);
+#endif
 			goto close_client_socket;
 		}
 
@@ -216,14 +255,23 @@ void* handleRequests(void* args)
 					 HOST_HEADER_HASH, (string*) &HOST_STRING))
 		{
 			const char* missingHostHeaderResponse = lookupStatusLine(BAD_REQUEST);
+#if TLS
+			write(ssl, (void*) missingHostHeaderResponse, DEFAULT_RESPONSE_LEN);
+#else
 			write(clientSocketDescriptor, (void*) missingHostHeaderResponse, DEFAULT_RESPONSE_LEN);
+#endif
 			goto close_client_socket;
 		}
 
 		if (readBytes == MAX_HTTP_HEADER_LEN)
 		{
-			i32 n = read(clientSocketDescriptor, buffer + MAX_HTTP_HEADER_LEN, 
+#if TLS
+			i32 n = read(ssl, requestBuffer + MAX_HTTP_HEADER_LEN, 
 						 MAX_HTTP_MESSAGE_LEN - MAX_HTTP_HEADER_LEN);
+#else
+			i32 n = read(clientSocketDescriptor, requestBuffer + MAX_HTTP_HEADER_LEN, 
+						 MAX_HTTP_MESSAGE_LEN - MAX_HTTP_HEADER_LEN);
+#endif
 			
 			if (n > 0)
 			{
@@ -233,7 +281,7 @@ void* handleRequests(void* args)
 				{
 	  				request.messageBody = 
 					{
-						buffer + MAX_HTTP_HEADER_LEN,
+						requestBuffer + MAX_HTTP_HEADER_LEN,
 						n
 					};
 				}
@@ -245,7 +293,11 @@ void* handleRequests(void* args)
 			case GET:
 			{
 				handleGetRequest(&response, &request, fileCache, requestLocalMemory);
-				if (writeResponse(clientSocketDescriptor, &response) == -1)
+#if TLS
+				if (writeResponse(ssl, &response, &writer) == -1)
+#else
+				if (writeResponse(clientSocketDescriptor, &response, &writer) == -1)
+#endif
 					goto close_client_socket;
 
 				break;
@@ -253,7 +305,11 @@ void* handleRequests(void* args)
 			case POST:
 			{
 				handlePostRequest(&response, &request, requestLocalMemory);
-				if (writeResponse(clientSocketDescriptor, &response) == -1)
+#if TLS
+				if (writeResponse(ssl, &response, &writer) == -1)
+#else
+				if (writeResponse(clientSocketDescriptor, &response, &writer) == -1)
+#endif
 					goto close_client_socket;
 
 				break;
@@ -261,6 +317,12 @@ void* handleRequests(void* args)
 		}
 
 	close_client_socket:
+#if TLS
+		SSL_shutdown(ssl);
+		SSL_free(ssl);
+#endif
+
+		reset(&writer);
 		reset(requestLocalMemory);
 		clear(&request.headerMap);
 		clear(&response.headerMap);
@@ -273,6 +335,19 @@ void* handleRequests(void* args)
 i16 serve(u16 port)
 { 
 	i16 retval = 0;
+
+#if TLS
+	SSL_CTX* ctx = SSL_CTX_new(TLS_server_method());
+	if (!ctx)
+		return -1;
+
+	if (SSL_CTX_use_certificate_chain_file(ctx, CERT_PATH) <= 0)
+		return -1;
+
+	if (SSL_CTX_use_PrivateKey_file(ctx, PRIVATE_KEY_PATH, SSL_FILETYPE_PEM) <= 0)
+		return -1;
+#endif
+
 	struct protoent* tcpProto = getprotobyname("tcp");
 	if(!tcpProto)
 		return -1;
@@ -376,6 +451,9 @@ server_clean_up:
 	if (close(socketDescriptor) == -1)
 		retval = -1;
 
+#if TLS
+	SSL_CTX_free(ctx);
+#endif
 	destroy(&programMemory);
 	return retval;
 }

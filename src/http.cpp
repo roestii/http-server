@@ -1,6 +1,6 @@
-#include <stdio.h>
 #include <assert.h>
 
+#include "string.h"
 #include "http.h"
 #include "mem.h"
 
@@ -210,6 +210,56 @@ i16 parseHttpRequest(u16* errorCode, http_request* result, char* buffer, u32 rea
 		result->messageBody = {0};
 	else
 		result->messageBody = { messageBodyStartPtr, messageBodyLen };
+
+	return 0;
+}
+
+void init(buffered_response_writer* writer)
+{
+	writer->nRemaining = MAX_HTTP_MESSAGE_LEN;
+	writer->offset = 0;
+}
+
+void reset(buffered_response_writer* writer)
+{
+	init(writer);
+}
+
+i16 pushChar(buffered_response_writer* writer, char c)
+{
+	if (writer->nRemaining < 1)
+		return -1;
+
+	char* currentPtr = writer->buffer + writer->offset;
+	*currentPtr = c;
+	++writer->offset;
+	--writer->nRemaining;
+
+	return 0;
+}
+
+i16 pushStr(buffered_response_writer* writer, char* str)
+{
+	char* currentPtr = writer->buffer + writer->offset;
+	i16 n = strnCpy(writer->buffer + writer->offset, str, writer->nRemaining);
+	if (n == -1)
+		return -1;
+
+	writer->offset += n;
+	writer->nRemaining -= n;
+
+	return 0;
+}
+
+i16 pushString(buffered_response_writer* writer, string* str)
+{
+	if (writer->nRemaining < str->len)
+		return -1;
+
+	char* currentPtr = writer->buffer + writer->offset;
+	memCpy(currentPtr, str->ptr, str->len);
+	writer->offset += str->len;
+	writer->nRemaining -= str->len;
 
 	return 0;
 }

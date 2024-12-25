@@ -15,4 +15,5 @@ constexpr u8 LZCNT_N_DECIMALS_TABLE[] =
 
 void u64ToStr(string*, arena_allocator*, usize);
 i16 strToU64(u64*, string*);
+i16 strnCpy(char*, char*, usize);
 #endif
