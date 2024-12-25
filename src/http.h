@@ -7,20 +7,27 @@
 
 #define CORRUPTED_HEADER -1
 
-constexpr u32 MAX_HTTP_HEADER_SIZE = 8 * 1024;
+constexpr u32 MAX_HTTP_MESSAGE_LEN = 1024 * 1024;
+constexpr u32 MAX_HTTP_HEADER_LEN = 8 * 1024;
 
 constexpr char HTTP_VERSION_1_1[] = "1.1 ";
 constexpr u32 HTTP_VERSION_1_1_LEN = sizeof(HTTP_VERSION_1_1) - 1;
 
 constexpr u16 OK = 200;
+
 constexpr u16 BAD_REQUEST = 400;
 constexpr u16 NOT_FOUND = 404;
+constexpr u16 TOO_LARGE = 413;
+
 constexpr u16 NOT_IMPLEMENTED = 501;
 
 // TODO(louis): implement a formatter
 constexpr char OK_RESPONSE[] = "HTTP/1.1 200 ";
+
 constexpr char BAD_REQUEST_RESPONSE[] = "HTTP/1.1 400 ";
 constexpr char NOT_FOUND_RESPONSE[] = "HTTP/1.1 404 ";
+constexpr char TOO_LARGE_RESPONSE[] = "HTTP/1.1 413 ";
+
 constexpr char NOT_IMPLEMENTED_RESPONSE[] = "HTTP/1.1 501 ";
 
 constexpr char ZERO_LEN[] = "0";

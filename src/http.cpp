@@ -15,8 +15,7 @@ void initEmptyResponse(http_response* result, http_status_code statusCode)
 
 const char* lookupStatusLine(http_status_code statusCode)
 {
-	// NOTE(louis): The caller has to ensure that the input is in fact a BASIC_RESPONSE. 
-	// Otherwise this is unsafe to call.
+	// TODO(louis): move this into a table.
 
 	switch (statusCode)
 	{
@@ -24,6 +23,7 @@ const char* lookupStatusLine(http_status_code statusCode)
 		case BAD_REQUEST: return BAD_REQUEST_RESPONSE;
 		case NOT_IMPLEMENTED: return NOT_IMPLEMENTED_RESPONSE;
 		case NOT_FOUND: return NOT_FOUND_RESPONSE;
+		case TOO_LARGE: return TOO_LARGE_RESPONSE;
 		default: __builtin_unreachable();
 	}
 }

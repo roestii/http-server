@@ -1,10 +1,11 @@
 // TODO(louis):
-// 	- compute the hash for common headers we have to check at compile time
 // 	- introduce proper error handling using the rfc
-// 	- fix the server closing
+// 	- fix the server closing (this may be fixed)
 // 	- implement some transfer encoding, for the response maybe... (but this might not actually be worth it)
 // 	- make the server multithreaded
-// 	- revisit the closing of the server
+// 	- parsing of the request target
+// 	- obsolete line folding
+// 	- what if the Content-Length + the header size exceeds 8000 bytes. should we just return message too large?
 
 #include <sys/socket.h>
 #include <arpa/inet.h>
@@ -155,7 +156,7 @@ void handlePostRequest(http_response* result, http_request* request, arena_alloc
 
 		if (contentLengthInt > messageBody.len)
 		{
-			initEmptyResponse(result, BAD_REQUEST);
+			initEmptyResponse(result, TOO_LARGE);
 			return;
 		}
 		
@@ -196,52 +197,66 @@ void* handleRequests(void* args)
 			// TODO(louis): Implement some proper error handling (see man page).
 			continue;
 
-		// TODO(louis): maybe only read if poll returns a positive number (something is there to read). 
-		// This might help handling multiple connections on one thread.
-		
-		char buffer[MAX_HTTP_HEADER_SIZE];
-		for (;;)
+		char buffer[MAX_HTTP_MESSAGE_LEN];
+		i32 readBytes = read(clientSocketDescriptor, buffer, MAX_HTTP_HEADER_LEN);	
+		if (readBytes <= 0)
+			goto close_client_socket;
+
+		u16 errorCode;
+		if (parseHttpRequest(&errorCode, &request, buffer, readBytes) == CORRUPTED_HEADER)
 		{
-			i32 readBytes = read(clientSocketDescriptor, buffer, MAX_HTTP_HEADER_SIZE);	
-			if (readBytes <= 0)
-				goto close_client_socket;
+			// TODO(louis): replace this with the actual error code
+			const char* corruptedHeaderResponse = lookupStatusLine(BAD_REQUEST);
+			write(clientSocketDescriptor, (void*) corruptedHeaderResponse, DEFAULT_RESPONSE_LEN);
+			goto close_client_socket;
+		}
 
-			u16 errorCode;
-			if (parseHttpRequest(&errorCode, &request, buffer, readBytes) == CORRUPTED_HEADER)
-			{
-				// TODO(louis): replace this with the actual error code
-				const char* corruptedHeaderResponse = lookupStatusLine(BAD_REQUEST);
-				write(clientSocketDescriptor, (void*) corruptedHeaderResponse, DEFAULT_RESPONSE_LEN);
-				goto close_client_socket;
-			}
+		string hostHeaderField;
+		if (!getHash(&hostHeaderField, &request.headerMap, 
+					 HOST_HEADER_HASH, (string*) &HOST_STRING))
+		{
+			const char* missingHostHeaderResponse = lookupStatusLine(BAD_REQUEST);
+			write(clientSocketDescriptor, (void*) missingHostHeaderResponse, DEFAULT_RESPONSE_LEN);
+			goto close_client_socket;
+		}
 
-			string hostHeaderField;
-			if (!getHash(&hostHeaderField, &request.headerMap, 
-						 HOST_HEADER_HASH, (string*) &HOST_STRING))
+		if (readBytes == MAX_HTTP_HEADER_LEN)
+		{
+			i32 n = read(clientSocketDescriptor, buffer + MAX_HTTP_HEADER_LEN, 
+						 MAX_HTTP_MESSAGE_LEN - MAX_HTTP_HEADER_LEN);
+			
+			if (n > 0)
 			{
-				const char* missingHostHeaderResponse = lookupStatusLine(BAD_REQUEST);
-				write(clientSocketDescriptor, (void*) missingHostHeaderResponse, DEFAULT_RESPONSE_LEN);
-				goto close_client_socket;
-			}
-
-			switch (request.method)
-			{
-				case GET:
+				if (request.messageBody.ptr)
+					request.messageBody.len += n;
+				else
 				{
-					handleGetRequest(&response, &request, fileCache, requestLocalMemory);
-	   				if (writeResponse(clientSocketDescriptor, &response) == -1)
-						goto close_client_socket;
-
-					break;
+	  				request.messageBody = 
+					{
+						buffer + MAX_HTTP_HEADER_LEN,
+						n
+					};
 				}
-				case POST:
-				{
-					handlePostRequest(&response, &request, requestLocalMemory);
-	   				if (writeResponse(clientSocketDescriptor, &response) == -1)
-						goto close_client_socket;
+			}
+		}
 
-					break;
-				}
+		switch (request.method)
+		{
+			case GET:
+			{
+				handleGetRequest(&response, &request, fileCache, requestLocalMemory);
+				if (writeResponse(clientSocketDescriptor, &response) == -1)
+					goto close_client_socket;
+
+				break;
+			}
+			case POST:
+			{
+				handlePostRequest(&response, &request, requestLocalMemory);
+				if (writeResponse(clientSocketDescriptor, &response) == -1)
+					goto close_client_socket;
+
+				break;
 			}
 		}
 
