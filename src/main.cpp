@@ -5,9 +5,11 @@
 // 	- make the server multithreaded
 // 	- parsing of the request target
 // 	- obsolete line folding
-// 	- connection management (close messages and timeouts) -> this would require concurrency
+// 	- connection management (close messages and timeouts) -> this would require concurrency (non blocking accept + read, and timeouts)
 // 	- logging 
 // 	- afl fuzzing
+// 	- put requests for putting blog posts on there (with authentication)
+// 	- templating for blog posts, and updates to cached blog overview page
 
 #include <sys/socket.h>
 #include <arpa/inet.h>
@@ -30,7 +32,7 @@
 #include "string.h"
 #include "http.h"
 
-constexpr u8 N_THREADS = 8;
+constexpr u8 N_THREADS = 1;
 constexpr u16 MAX_N_PENDING_CONNECTIONS = 128;
 constexpr u16 PORT = 8080;
 
@@ -217,11 +219,25 @@ void* handleRequests(void* args)
 
 #if TLS
 		ssl = SSL_new(ctx);
-		if (!SSL_set_fd(ssl, clientSocketDescriptor))
+
+		if (!ssl)
+	  	{
+			fprintf(stderr, "Cannot acquire ssl object.\n");
 			goto close_client_socket;
+		}
+
+		if (!SSL_set_fd(ssl, clientSocketDescriptor))
+	  	{
+			fprintf(stderr, "Cannot set fd for ssl object.\n");
+			goto close_client_socket;
+		}
 
 		if (SSL_accept(ssl) <= 0)
+	  	{
+			// TODO(louis): check for the individual return values.
+			fprintf(stderr, "Cannot establish ssl connection.\n");
 			goto close_client_socket;
+		}
 #endif
 
 		char requestBuffer[MAX_HTTP_MESSAGE_LEN];
@@ -318,8 +334,11 @@ void* handleRequests(void* args)
 
 	close_client_socket:
 #if TLS
-		SSL_shutdown(ssl);
-		SSL_free(ssl);
+	  	if (ssl)
+	  	{
+			SSL_shutdown(ssl);
+			SSL_free(ssl);
+		}
 #endif
 
 		reset(&writer);
@@ -339,13 +358,22 @@ i16 serve(u16 port)
 #if TLS
 	SSL_CTX* ctx = SSL_CTX_new(TLS_server_method());
 	if (!ctx)
+	{
+		fprintf(stderr, "Cannot aquire ssl context.\n");
 		return -1;
+	}
 
 	if (SSL_CTX_use_certificate_chain_file(ctx, CERT_PATH) <= 0)
+	{
+		fprintf(stderr, "Cannot load certificate.\n");
 		return -1;
+	}
 
 	if (SSL_CTX_use_PrivateKey_file(ctx, PRIVATE_KEY_PATH, SSL_FILETYPE_PEM) <= 0)
+	{
+		fprintf(stderr, "Cannot load private key.\n");
 		return -1;
+	}
 #endif
 
 	struct protoent* tcpProto = getprotobyname("tcp");
@@ -426,6 +454,7 @@ i16 serve(u16 port)
 			currentArg->fileCache = &fileCache;
 			currentArg->socketDescriptor = socketDescriptor;
 			currentArg->requestLocalMemory = currentAlloc;
+			currentArg->ctx = ctx;
 
 			if (pthread_create(currentThreadHandle, NULL, handleRequests, (void*) currentArg) != 0)
 			{
