@@ -1,3 +1,4 @@
+*.conf
 *.pem
 *.o
 http_server

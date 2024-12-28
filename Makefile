@@ -4,16 +4,18 @@ endif
 
 ifeq ($(TLS), 1)
 CFLAGS += -DTLS=1
-CFLAGS += -lssl
+LINK_SSL = -lssl
 endif 
+
+
 
 ifeq ($(DEBUG_MODE), 1)
 CFLAGS += -DDEBUG_MODE=1
 CFLAGS += -g
 endif
 
-http_server: main.o http.o mem.o arena_allocator.o http_header_map.o string.o file_cache.o
-	$(CC) $(CFLAGS) -o http_server main.o http.o mem.o arena_allocator.o http_header_map.o string.o file_cache.o
+http_server: main.o http.o mem.o arena_allocator.o http_header_map.o string.o file_cache.o authentication.o
+	$(CC) $(CFLAGS) $(LINK_SSL) -lcrypto -o http_server main.o http.o mem.o arena_allocator.o http_header_map.o string.o file_cache.o authentication.o
 
 mem.o: src/mem.cpp src/mem.h src/types.h
 	$(CC) $(CFLAGS) -c src/mem.cpp
@@ -39,7 +41,10 @@ http_header_map.o: src/http_header_map.cpp src/http_header_map.h src/types.h src
 http.o: src/http.cpp src/http.h src/mem.h src/types.h
 	$(CC) $(CFLAGS) -c src/http.cpp 
 
-main.o: src/main.cpp src/http.h src/types.h src/file_cache.h src/arena_allocator.h src/http_header_map.h
+authentication.o: src/authentication.cpp src/authentication.h src/mem.h src/types.h
+	$(CC) $(CFLAGS) -c src/authentication.cpp 
+
+main.o: src/main.cpp src/http.h src/types.h src/file_cache.h src/arena_allocator.h src/http_header_map.h src/authentication.h
 	$(CC) $(CFLAGS) -c src/main.cpp
 
 clean:

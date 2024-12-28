@@ -26,9 +26,11 @@ constexpr char SP = ' ';
 
 constexpr char GET_METHOD_NAME[] = "GET";
 constexpr char POST_METHOD_NAME[] = "POST";
+constexpr char PUT_METHOD_NAME[] = "PUT";
 
 constexpr u32 GET_METHOD_NAME_LEN = sizeof(GET_METHOD_NAME) - 1;
 constexpr u32 POST_METHOD_NAME_LEN = sizeof(POST_METHOD_NAME) - 1;
+constexpr u32 PUT_METHOD_NAME_LEN = sizeof(PUT_METHOD_NAME) - 1;
 
 
 bool stringEql(string*, string*);
@@ -36,6 +38,7 @@ bool stringEql(string*, string*);
 bool memEql(char*, char*, usize);
 bool memEqlGet(char*);
 bool memEqlPost(char*);
+bool memEqlPut(char*);
 bool memEqlCrlf(char*);
 bool memEqlHttpVersionPrefix(char*);
 

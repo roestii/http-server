@@ -47,6 +47,15 @@ bool memEqlGet(char* haystack)
 		   && *(haystack + 2) == GET_METHOD_NAME[2];
 }
 
+bool memEqlPut(char* haystack)
+{
+	// NOTE(louis): the caller has to ensure that the size of the haystack is at least 
+	// as long as PUT
+	return *haystack == PUT_METHOD_NAME[0]
+		&& *(haystack + 1) == PUT_METHOD_NAME[1]
+		&& *(haystack + 2) == PUT_METHOD_NAME[2];
+}
+
 bool memEqlPost(char* haystack)
 {
 	// NOTE(louis): the caller has to ensure that the size of the haystack is at least 

@@ -2,7 +2,6 @@
 // 	- introduce proper error handling using the rfc
 // 	- fix the server closing (this may be fixed)
 // 	- implement some transfer encoding, for the response maybe... (but this might not actually be worth it)
-// 	- make the server multithreaded
 // 	- parsing of the request target
 // 	- obsolete line folding
 // 	- connection management (close messages and timeouts) -> this would require concurrency (non blocking accept + read, and timeouts)
@@ -20,6 +19,7 @@
 #include <assert.h>
 #include <netdb.h>
 #include <pthread.h>
+#include <fcntl.h>
 
 #if TLS
 #include <openssl/ssl.h>
@@ -31,28 +31,43 @@
 #include "types.h"
 #include "string.h"
 #include "http.h"
+#include "authentication.h"
 
 constexpr u8 N_THREADS = 1;
 constexpr u16 MAX_N_PENDING_CONNECTIONS = 128;
 constexpr u16 PORT = 8080;
 
+
 constexpr usize MEMORY_LIMIT = 10 * 1024 * 1024;
 constexpr usize FILE_CACHE_LIMIT = 8 * 1024 * 1024;
 constexpr usize THREAD_LOCAL_MEMORY = (MEMORY_LIMIT - FILE_CACHE_LIMIT) / N_THREADS;
 
-constexpr char PRIVATE_KEY_PATH[] = "key.pem";
-constexpr char CERT_PATH[] = "cert.pem";
+#ifndef PRIVATE_KEY_PATH
+#define PRIVATE_KEY_PATH "key.pem"
+#endif
+
+#ifndef CERT_PATH
+#define CERT_PATH "cert.pem"
+#endif
+
+#ifndef AUTH_HASH_PATH
+#define AUTH_HASH_PATH "auth.conf"
+#endif
 
 pthread_mutex_t killMutex;
 pthread_cond_t killSignal;
 
 #if TLS
-#define read(a, b, c) SSL_read(a, b, c)
-#define write(a, b, c) SSL_write(a, b, c)
+#define sockRead(a, b, c) SSL_read(a, b, c)
+#define sockWrite(a, b, c) SSL_write(a, b, c)
 typedef SSL* write_handle; 
 #else
+#define sockRead(a, b, c) read(a, b, c)
+#define sockWrite(a, b, c) write(a, b, c)
 typedef i32 write_handle;
 #endif
+
+u8 PUT_PASSWD_HASH[SHA256_DIGEST_LENGTH];
 
 void signalHandler(i32 signalId)
 {
@@ -109,7 +124,7 @@ i16 writeResponse(write_handle wh, http_response* response, buffered_response_wr
 	if (messageBody.ptr && pushString(writer, &messageBody) == -1)
 		return -1;
 	
-	if (write(wh, writer->buffer, writer->offset) == -1)
+	if (sockWrite(wh, writer->buffer, writer->offset) == -1)
 		return -1;
 
 	return 0;
@@ -133,7 +148,7 @@ void handleGetRequest(http_response* result, http_request* request,
 		};
 		string contentLengthValue;
 		u64ToStr(&contentLengthValue, alloc, fileHandle.fileSize);
-		insert(&result->headerMap, (string*) &CONTENT_LENGTH_STRING, &contentLengthValue);
+		insert(&result->headerMap, (string*) &CONTENT_LENGTH_HEADER_NAME, &contentLengthValue);
 	}
 	else
 		initEmptyResponse(result, NOT_FOUND);
@@ -145,9 +160,9 @@ void handlePostRequest(http_response* result, http_request* request, arena_alloc
 	string transferCoding;
 	string contentLength;
 	i16 hasTransferCoding = getHash(&transferCoding, &request->headerMap, 
-								 	TRANSFER_ENCODING_HASH, (string*) &TRANSFER_ENCODING_STRING);
+								 	TRANSFER_ENCODING_HASH, (string*) &TRANSFER_ENCODING_HEADER_NAME);
 	i16 hasContentLength = getHash(&contentLength, &request->headerMap, 
-								   CONTENT_LENGTH_HASH, (string*) &CONTENT_LENGTH_STRING);
+								   CONTENT_LENGTH_HASH, (string*) &CONTENT_LENGTH_HEADER_NAME);
 
 	if (hasTransferCoding && hasContentLength)
 		// TODO(louis): send some response
@@ -170,9 +185,82 @@ void handlePostRequest(http_response* result, http_request* request, arena_alloc
 			initEmptyResponse(result, TOO_LARGE);
 			return;
 		}
-		
-		initEmptyResponse(result, OK);
-		insert(&result->headerMap, (string*) &CONTENT_LENGTH_STRING, (string*) &ZERO_LEN_STRING);
+
+		if (stringEql(&request->requestTarget, (string*) &NEWSLETTER_SIGNUP_ROUTE))
+		{
+			initEmptyResponse(result, OK);
+			insert(&result->headerMap, (string*) &CONTENT_LENGTH_HEADER_NAME, (string*) &ZERO_LEN);
+		}
+		else
+		{
+			initEmptyResponse(result, NOT_FOUND);
+			return;
+		}
+	}
+	else
+		initEmptyResponse(result, BAD_REQUEST);
+}
+
+void handlePutRequest(http_response* result, http_request* request, arena_allocator* alloc)
+{
+	// NOTE(louis): the caller has to ensure that the headerMap of the result was initialized.
+	string transferCoding;
+	string contentLength;
+	string auth;
+
+	i16 hasTransferCoding = getHash(&transferCoding, &request->headerMap, 
+								 	TRANSFER_ENCODING_HASH, (string*) &TRANSFER_ENCODING_HEADER_NAME);
+	i16 hasContentLength = getHash(&contentLength, &request->headerMap, 
+								   CONTENT_LENGTH_HASH, (string*) &CONTENT_LENGTH_HEADER_NAME);
+	i16 hasAuth = getHash(&auth, &request->headerMap, 
+						  AUTH_HEADER_HASH, (string*) &AUTH_HEADER_NAME);
+
+	if (!hasAuth)
+	{
+		initEmptyResponse(result, BAD_REQUEST);
+		return;
+	}
+
+	if (hasTransferCoding && hasContentLength)
+		// TODO(louis): send some response
+		// The version and the header map should already be initialized.
+		initEmptyResponse(result, BAD_REQUEST);
+	else if (hasTransferCoding)
+		initEmptyResponse(result, NOT_IMPLEMENTED);
+	else if (hasContentLength)
+	{
+		string messageBody = request->messageBody;
+		u64 contentLengthInt;
+		if (strToU64(&contentLengthInt, &contentLength) == -1)
+		{
+			initEmptyResponse(result, BAD_REQUEST);
+			return;
+		}
+
+		if (contentLengthInt > messageBody.len)
+		{
+			initEmptyResponse(result, TOO_LARGE);
+			return;
+		}
+
+		if (stringEql(&request->requestTarget, (string*) &ADD_ARTICLE_ROUTE))
+		{
+
+			if (authenticate(&auth, PUT_PASSWD_HASH))
+			{
+				initEmptyResponse(result, OK);
+				insert(&result->headerMap, (string*) &CONTENT_LENGTH_HEADER_NAME, (string*) &ZERO_LEN);
+			}
+			else
+			{	
+				initEmptyResponse(result, BAD_REQUEST);
+			}
+		}
+		else
+		{
+			initEmptyResponse(result, NOT_FOUND);
+			return;
+		}
 	}
 	else
 		initEmptyResponse(result, BAD_REQUEST);
@@ -245,9 +333,9 @@ void* handleRequests(void* args)
 		buffered_response_writer writer;
 		init(&writer);
 #if TLS
-		readBytes = read(ssl, requestBuffer, MAX_HTTP_HEADER_LEN);	
+		readBytes = sockRead(ssl, requestBuffer, MAX_HTTP_HEADER_LEN);	
 #else
-		readBytes = read(clientSocketDescriptor, requestBuffer, MAX_HTTP_HEADER_LEN);	
+		readBytes = sockRead(clientSocketDescriptor, requestBuffer, MAX_HTTP_HEADER_LEN);	
 #endif
 
 		if (readBytes <= 0)
@@ -256,25 +344,29 @@ void* handleRequests(void* args)
 		u16 errorCode;
 		if (parseHttpRequest(&errorCode, &request, requestBuffer, readBytes) == CORRUPTED_HEADER)
 		{
-			// TODO(louis): replace this with the actual error code
-			const char* corruptedHeaderResponse = lookupStatusLine(BAD_REQUEST);
+			// TODO(louis): replace this with the actual error code, and maybe make this more performant
+			pushStr(&writer, (char*) lookupStatusLine(BAD_REQUEST));
+			pushStr(&writer, (char*) CRLF);
+			pushStr(&writer, (char*) CRLF);
 #if TLS
-			write(ssl, (void*) corruptedHeaderResponse, DEFAULT_RESPONSE_LEN);
+			sockWrite(ssl, (void*) writer.buffer, writer.offset);
 #else
-			write(clientSocketDescriptor, (void*) corruptedHeaderResponse, DEFAULT_RESPONSE_LEN);
+			sockWrite(clientSocketDescriptor, (void*) writer.buffer, writer.offset);
 #endif
 			goto close_client_socket;
 		}
 
 		string hostHeaderField;
 		if (!getHash(&hostHeaderField, &request.headerMap, 
-					 HOST_HEADER_HASH, (string*) &HOST_STRING))
+					 HOST_HEADER_HASH, (string*) &HOST_HEADER_NAME))
 		{
-			const char* missingHostHeaderResponse = lookupStatusLine(BAD_REQUEST);
+			pushStr(&writer, (char*) lookupStatusLine(BAD_REQUEST));
+			pushStr(&writer, (char*) CRLF);
+			pushStr(&writer, (char*) CRLF);
 #if TLS
-			write(ssl, (void*) missingHostHeaderResponse, DEFAULT_RESPONSE_LEN);
+			sockWrite(ssl, (void*) writer.buffer, writer.offset);
 #else
-			write(clientSocketDescriptor, (void*) missingHostHeaderResponse, DEFAULT_RESPONSE_LEN);
+			sockWrite(clientSocketDescriptor, (void*) writer.buffer, writer.offset);
 #endif
 			goto close_client_socket;
 		}
@@ -282,10 +374,10 @@ void* handleRequests(void* args)
 		if (readBytes == MAX_HTTP_HEADER_LEN)
 		{
 #if TLS
-			i32 n = read(ssl, requestBuffer + MAX_HTTP_HEADER_LEN, 
+			i32 n = sockRead(ssl, requestBuffer + MAX_HTTP_HEADER_LEN, 
 						 MAX_HTTP_MESSAGE_LEN - MAX_HTTP_HEADER_LEN);
 #else
-			i32 n = read(clientSocketDescriptor, requestBuffer + MAX_HTTP_HEADER_LEN, 
+			i32 n = sockRead(clientSocketDescriptor, requestBuffer + MAX_HTTP_HEADER_LEN, 
 						 MAX_HTTP_MESSAGE_LEN - MAX_HTTP_HEADER_LEN);
 #endif
 			
@@ -321,6 +413,18 @@ void* handleRequests(void* args)
 			case POST:
 			{
 				handlePostRequest(&response, &request, requestLocalMemory);
+#if TLS
+				if (writeResponse(ssl, &response, &writer) == -1)
+#else
+				if (writeResponse(clientSocketDescriptor, &response, &writer) == -1)
+#endif
+					goto close_client_socket;
+
+				break;
+			}
+			case PUT:
+			{
+				handlePutRequest(&response, &request, requestLocalMemory);
 #if TLS
 				if (writeResponse(ssl, &response, &writer) == -1)
 #else
@@ -454,7 +558,9 @@ i16 serve(u16 port)
 			currentArg->fileCache = &fileCache;
 			currentArg->socketDescriptor = socketDescriptor;
 			currentArg->requestLocalMemory = currentAlloc;
+#if TLS
 			currentArg->ctx = ctx;
+#endif
 
 			if (pthread_create(currentThreadHandle, NULL, handleRequests, (void*) currentArg) != 0)
 			{
@@ -487,8 +593,35 @@ server_clean_up:
 	return retval;
 }
 
+i16 loadEnv()
+{
+	i16 retval = 0;
+	i32 fd = open(AUTH_HASH_PATH, O_RDONLY);
+	if (fd == -1)
+		return -1;
+
+	char PASSWD_HASH_STR[2 * SHA256_DIGEST_LENGTH];
+	i32 n = read(fd, (void*) PASSWD_HASH_STR, sizeof(PASSWD_HASH_STR));
+	if (n != sizeof(PASSWD_HASH_STR))
+		retval = -1;
+
+	if (hexdecodeSHA256(PUT_PASSWD_HASH, PASSWD_HASH_STR) == -1)
+		retval = -1;
+
+	if (close(fd) == -1)
+		retval = -1;
+
+	return retval;
+}
+
 i32 main(i32 argc, char** argv)
 {
+	if (loadEnv() == -1)
+	{
+		fprintf(stderr, "Cannot read authentication config.\n");
+		return -1;
+	}
+
 	if (pthread_mutex_init(&killMutex, NULL) != 0)
 		return -1;
 	if (pthread_mutex_lock(&killMutex) != 0)

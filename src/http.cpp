@@ -127,10 +127,12 @@ i16 parseHttpRequest(u16* errorCode, http_request* result, char* buffer, u32 rea
 
 	switch (methodLen)
 	{
-		case GET_METHOD_NAME_LEN:
+		case GET_METHOD_NAME_LEN: /* NOTE(louis): PUT_METHOD_NAME_LEN is the same */
 		{
 			if (memEqlGet(buffer)) 
 				result->method = GET;
+			else if (memEqlPut(buffer))
+				result->method = PUT;
 			else 
 				// TODO(louis): set the error code.
 				return CORRUPTED_HEADER;
