@@ -9,6 +9,7 @@
 // 	- afl fuzzing
 // 	- put requests for putting blog posts on there (with authentication)
 // 	- templating for blog posts, and updates to cached blog overview page
+// 	- database connection for newsletter signup (libpq)
 
 #include <sys/socket.h>
 #include <arpa/inet.h>
@@ -32,11 +33,11 @@
 #include "string.h"
 #include "http.h"
 #include "authentication.h"
+#include "articles.h"
 
 constexpr u8 N_THREADS = 1;
 constexpr u16 MAX_N_PENDING_CONNECTIONS = 128;
 constexpr u16 PORT = 8080;
-
 
 constexpr usize MEMORY_LIMIT = 10 * 1024 * 1024;
 constexpr usize FILE_CACHE_LIMIT = 8 * 1024 * 1024;
@@ -67,7 +68,7 @@ typedef SSL* write_handle;
 typedef i32 write_handle;
 #endif
 
-u8 PUT_PASSWD_HASH[SHA256_DIGEST_LENGTH];
+u8 putPasswdHash[SHA256_DIGEST_LENGTH];
 
 void signalHandler(i32 signalId)
 {
@@ -137,7 +138,7 @@ void handleGetRequest(http_response* result, http_request* request,
 	// TODO(louis): Make sure that this is actually safe
 	request->requestTarget.ptr++;
 	request->requestTarget.len--;
-	if (get(&fileHandle, fileCache, &request->requestTarget))
+	if (get(&fileHandle, fileCache, &request->requestTarget) == 1)
 	{
 		result->statusCode = OK;
 		result->reason = NULL;
@@ -153,6 +154,10 @@ void handleGetRequest(http_response* result, http_request* request,
 	else
 		initEmptyResponse(result, NOT_FOUND);
 }
+
+// i16 getContent(http_request* request, arena_allocator* alloc)
+// {
+// }
 
 void handlePostRequest(http_response* result, http_request* request, arena_allocator* alloc)
 {
@@ -201,7 +206,9 @@ void handlePostRequest(http_response* result, http_request* request, arena_alloc
 		initEmptyResponse(result, BAD_REQUEST);
 }
 
-void handlePutRequest(http_response* result, http_request* request, arena_allocator* alloc)
+
+void handlePutRequest(http_response* result, http_request* request, 
+					  arena_allocator* alloc, articles_resource* resource)
 {
 	// NOTE(louis): the caller has to ensure that the headerMap of the result was initialized.
 	string transferCoding;
@@ -245,14 +252,30 @@ void handlePutRequest(http_response* result, http_request* request, arena_alloca
 
 		if (stringEql(&request->requestTarget, (string*) &ADD_ARTICLE_ROUTE))
 		{
-
-			if (authenticate(&auth, PUT_PASSWD_HASH))
+			if (authenticate(&auth, putPasswdHash))
 			{
+				string fileName;
+				i16 hasFileName = getHash(&fileName, &request->headerMap, 
+						  			  	  FILENAME_HEADER_HASH, (string*) &FILENAME_HEADER_NAME);
+
+				if (!hasFileName)
+				{
+					initEmptyResponse(result, BAD_REQUEST);
+					return;
+				}
+
+				if (putArticle(resource, fileName.ptr, fileName.len, 
+			   			   	   messageBody.ptr, contentLengthInt) == -1)
+				{
+					initEmptyResponse(result, INTERNAL_SERVER_ERROR);
+					return;
+				}
+
 				initEmptyResponse(result, OK);
 				insert(&result->headerMap, (string*) &CONTENT_LENGTH_HEADER_NAME, (string*) &ZERO_LEN);
 			}
 			else
-			{	
+			{
 				initEmptyResponse(result, BAD_REQUEST);
 			}
 		}
@@ -271,6 +294,7 @@ struct handle_request_args
 	file_cache* fileCache;
 	arena_allocator* requestLocalMemory;
 	i32 socketDescriptor;
+	articles_resource* resource;
 #if TLS
 	SSL_CTX* ctx;
 #endif
@@ -282,6 +306,7 @@ void* handleRequests(void* args)
 	file_cache* fileCache = handleRequestArgs->fileCache;
 	arena_allocator* requestLocalMemory = handleRequestArgs->requestLocalMemory;
 	i32 socketDescriptor = handleRequestArgs->socketDescriptor;
+	articles_resource* resource = handleRequestArgs->resource;
 
 #if TLS
 	SSL_CTX* ctx = handleRequestArgs->ctx;
@@ -424,7 +449,7 @@ void* handleRequests(void* args)
 			}
 			case PUT:
 			{
-				handlePutRequest(&response, &request, requestLocalMemory);
+				handlePutRequest(&response, &request, requestLocalMemory, resource);
 #if TLS
 				if (writeResponse(ssl, &response, &writer) == -1)
 #else
@@ -485,6 +510,7 @@ i16 serve(u16 port)
 		return -1;
 
 	arena_allocator programMemory;
+	// TODO(louis): Fix this probably wrong order
 	if (init(&programMemory, MEMORY_LIMIT) == -1)
 		return -1;
 
@@ -532,7 +558,16 @@ i16 serve(u16 port)
 
 	{
 		file_cache fileCache;
-		if (buildStaticCache(&fileCache, &fileCacheMemory) == -1)
+		articles_resource resource;
+		if (init(&fileCache, &fileCacheMemory) == -1)
+		{
+			retval = -1;
+			goto server_clean_up;
+		}
+
+		init(&resource, &fileCache.guard);
+
+		if (buildStaticCache(&fileCache) == -1)
 		{
 			retval = -1;
 			goto server_clean_up;
@@ -558,6 +593,7 @@ i16 serve(u16 port)
 			currentArg->fileCache = &fileCache;
 			currentArg->socketDescriptor = socketDescriptor;
 			currentArg->requestLocalMemory = currentAlloc;
+			currentArg->resource = &resource;
 #if TLS
 			currentArg->ctx = ctx;
 #endif
@@ -580,6 +616,8 @@ i16 serve(u16 port)
 			if (pthread_kill(threadHandles[i], 0) != 0)
 				retval = -1;
 		}
+
+		destroy(&fileCache);
 	}
 
 server_clean_up:
@@ -600,12 +638,12 @@ i16 loadEnv()
 	if (fd == -1)
 		return -1;
 
-	char PASSWD_HASH_STR[2 * SHA256_DIGEST_LENGTH];
-	i32 n = read(fd, (void*) PASSWD_HASH_STR, sizeof(PASSWD_HASH_STR));
-	if (n != sizeof(PASSWD_HASH_STR))
+	char passwdHashStr[2 * SHA256_DIGEST_LENGTH];
+	i32 n = read(fd, (void*) passwdHashStr, sizeof(passwdHashStr));
+	if (n != sizeof(passwdHashStr))
 		retval = -1;
 
-	if (hexdecodeSHA256(PUT_PASSWD_HASH, PASSWD_HASH_STR) == -1)
+	if (hexdecodeSHA256(putPasswdHash, passwdHashStr) == -1)
 		retval = -1;
 
 	if (close(fd) == -1)

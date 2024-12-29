@@ -14,8 +14,13 @@ constexpr string name = \
 	sizeof(value) - 1 \
 }; \
 
+#define DEFINE_STATUS_LINE(name, statusCode) \
+constexpr char name[] = HTTP/1.1 200 ## statusCode; \
+
+
 DEFINE_STRING(ADD_ARTICLE_ROUTE, "/add-article");
 DEFINE_STRING(NEWSLETTER_SIGNUP_ROUTE, "/newsletter-signup");
+
 
 constexpr u32 MAX_HTTP_MESSAGE_LEN = 1024 * 1024;
 constexpr u32 MAX_HTTP_HEADER_LEN = 8 * 1024;
@@ -27,12 +32,14 @@ constexpr u16 OK = 200;
 constexpr u16 BAD_REQUEST = 400;
 constexpr u16 NOT_FOUND = 404;
 constexpr u16 TOO_LARGE = 413;
+constexpr u16 INTERNAL_SERVER_ERROR = 500;
 constexpr u16 NOT_IMPLEMENTED = 501;
 
 constexpr char OK_RESPONSE[] = "HTTP/1.1 200 ";
 constexpr char BAD_REQUEST_RESPONSE[] = "HTTP/1.1 400 ";
 constexpr char NOT_FOUND_RESPONSE[] = "HTTP/1.1 404 ";
 constexpr char TOO_LARGE_RESPONSE[] = "HTTP/1.1 413 ";
+constexpr char INTERNAL_SERVER_ERROR_RESPONSE[] = "HTTP/1.1 500 ";
 constexpr char NOT_IMPLEMENTED_RESPONSE[] = "HTTP/1.1 501 ";
 constexpr u32 DEFAULT_RESPONSE_LEN = sizeof(OK_RESPONSE) - 1;
 
@@ -41,12 +48,14 @@ DEFINE_STRING(TRANSFER_ENCODING_HEADER_NAME, "Transfer-Encoding");
 DEFINE_STRING(CONTENT_LENGTH_HEADER_NAME, "Content-Length"); 
 DEFINE_STRING(HOST_HEADER_NAME, "Host");
 DEFINE_STRING(AUTH_HEADER_NAME, "Authorization");
+DEFINE_STRING(FILENAME_HEADER_NAME, "X-Filename");
 
 
 constexpr u64 TRANSFER_ENCODING_HASH = hash((string*) &TRANSFER_ENCODING_HEADER_NAME);
 constexpr u64 CONTENT_LENGTH_HASH = hash((string*) &CONTENT_LENGTH_HEADER_NAME);
 constexpr u64 HOST_HEADER_HASH = hash((string*) &HOST_HEADER_NAME);
 constexpr u64 AUTH_HEADER_HASH= hash((string*) &AUTH_HEADER_NAME);
+constexpr u64 FILENAME_HEADER_HASH = hash((string*) &FILENAME_HEADER_NAME);
 
 typedef u16 http_status_code;
 
