@@ -3,10 +3,10 @@
 
 #include <pthread.h>
 #include "types.h"
-#include "file_cache.h"
+#include "mem.h"
 
-constexpr u8 TITLE_SIZE = 128;
-constexpr u16 PREVIEW_SIZE = 256;
+constexpr u8 MAX_TITLE_LENGTH = 128;
+constexpr u16 MAX_PREVIEW_LENGTH = 256;
 constexpr u8 MAX_SUBSCRIBERS = 16;
 constexpr u8 MAX_ARTICLE_PREVIEWS = 16;
 
@@ -16,25 +16,20 @@ constexpr u8 MAX_ARTICLE_PREVIEWS = 16;
 
 struct article_preview
 {
-	char title[TITLE_SIZE];
-	char preview[PREVIEW_SIZE];
+	char title[MAX_TITLE_LENGTH];
+	char preview[MAX_PREVIEW_LENGTH];
 };
 
 struct articles_resource
 {
-	pthread_mutex_t* fileCacheGuard;
+	pthread_mutex_t guard;
 	char pathBuffer[sizeof(ARTICLES_PATH) + FILE_PATH_LEN - 1];
-
-	file_handle_entry* subscribers[MAX_SUBSCRIBERS];
-	u32 subscribersLen;
-
 	article_preview articlePreviews[MAX_ARTICLE_PREVIEWS];
 	u32 articlePreviewsLen;
 };
 
-void init(articles_resource*, pthread_mutex_t*);
-// i16 destroy(articles_resource*);
-i16 addSubscriber(file_handle_entry*);
+i16 init(articles_resource*); 
+i16 destroy(articles_resource*);
 i16 putArticle(articles_resource*, char*, usize, char*, usize);
 
 #endif

@@ -10,6 +10,8 @@ struct string
 	isize len;
 };
 
+#define FILE_PATH_LEN 256
+
 constexpr char HTTP_VERSION_PREFIX[] = "HTTP/";
 constexpr u32 HTTP_VERSION_PREFIX_LEN = sizeof(HTTP_VERSION_PREFIX) - 1;
 

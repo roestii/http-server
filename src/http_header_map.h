@@ -3,24 +3,7 @@
 
 #include "mem.h"
 #include "types.h"
-#include "arena_allocator.h"
-
-constexpr u64 HASH_P = 53;
-constexpr u64 HASH_M = 1e9 + 9;
-constexpr u64 HASH_A = 0x678DDE6F; // knuth recommendation
-
-constexpr u8 HORNER_CONSTANT = 3;
-
-constexpr u32 HASH_TABLE_M = 256; // m = 2^p
-constexpr u32 HASH_TABLE_P = 8;
-constexpr u32 HASH_TABLE_Q = 16; // amount of right shifts
-
-enum bucket_tag
-{
-	INITIALIZED,
-	EMPTY,
-	TOMBSTONE
-};
+#include "hash.h"
 
 struct http_header_bucket 
 {
@@ -40,26 +23,6 @@ struct http_header_map
 	u32 len;
 	http_header_bucket buckets[HASH_TABLE_M];				
 };
-
-constexpr u64 hash(string* value)
-{
-	// NOTE(louis): The caller has to ensure that this function is not called with a string 
-	// of length zero.
-	
-	u32 minLen = HORNER_CONSTANT;
-	if (value->len < minLen)
-		minLen = value->len;
-
-	char* lastPtr = value->ptr + value->len - 1;
-	u64 h = *lastPtr;
-	--lastPtr;
-	for (int i = 0; i < minLen - 1; ++i, --lastPtr)
-	{
-		h = HASH_P * h + *lastPtr;
-	}
-
-	return (h * HASH_A >> HASH_TABLE_Q) & (HASH_TABLE_M - 1);
-}
 
 void init(http_header_map*);
 void clear(http_header_map*);

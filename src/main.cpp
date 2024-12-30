@@ -134,30 +134,29 @@ i16 writeResponse(write_handle wh, http_response* response, buffered_response_wr
 void handleGetRequest(http_response* result, http_request* request, 
 					  file_cache* fileCache, arena_allocator* alloc)
 {
-	file_handle_entry fileHandle;
+	file_bucket file;
 	// TODO(louis): Make sure that this is actually safe
 	request->requestTarget.ptr++;
 	request->requestTarget.len--;
-	if (get(&fileHandle, fileCache, &request->requestTarget) == 1)
+	// TODO(louis): Should we acquire the mutex every time? Writes to the file cache are very rare.
+	if (get(&file, fileCache, &request->requestTarget) <= 0)
 	{
-		result->statusCode = OK;
-		result->reason = NULL;
-		result->messageBody = 
-		{ 
-			fileHandle.contentHandle, 
-			(isize) fileHandle.fileSize 
-		};
-		string contentLengthValue;
-		u64ToStr(&contentLengthValue, alloc, fileHandle.fileSize);
-		insert(&result->headerMap, (string*) &CONTENT_LENGTH_HEADER_NAME, &contentLengthValue);
-	}
-	else
 		initEmptyResponse(result, NOT_FOUND);
-}
+		return;
+	}
 
-// i16 getContent(http_request* request, arena_allocator* alloc)
-// {
-// }
+	result->statusCode = OK;
+	result->reason = NULL;
+	result->messageBody = 
+	{ 
+		file.content, 
+		(isize) file.contentLen
+	};
+
+	string contentLengthValue;
+	u64ToStr(&contentLengthValue, alloc, file.contentLen);
+	insert(&result->headerMap, (string*) &CONTENT_LENGTH_HEADER_NAME, &contentLengthValue);
+}
 
 void handlePostRequest(http_response* result, http_request* request, arena_allocator* alloc)
 {
@@ -558,20 +557,20 @@ i16 serve(u16 port)
 
 	{
 		file_cache fileCache;
-		articles_resource resource;
 		if (init(&fileCache, &fileCacheMemory) == -1)
 		{
 			retval = -1;
 			goto server_clean_up;
 		}
 
-		init(&resource, &fileCache.guard);
-
 		if (buildStaticCache(&fileCache) == -1)
 		{
 			retval = -1;
 			goto server_clean_up;
 		}
+
+		articles_resource resource;
+		init(&resource);
 
 		pthread_t threadHandles[N_THREADS];
 		arena_allocator requestLocalMemory[N_THREADS];

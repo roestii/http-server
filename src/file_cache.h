@@ -6,17 +6,28 @@
 
 #include "types.h"
 #include "mem.h"
+#include "hash.h"
 #include "arena_allocator.h"
 
-constexpr u16 MAX_STATIC_FILES = 128;
-constexpr u16 FILE_PATH_LEN = 256;
 constexpr char STATIC_FILE_DIR[] = "/var/www/static/";
 
-struct file_handle_entry
+
+// TODO(louis): what about cache eviction?
+// enum cache_status
+// {
+// 	CACHED,
+// 	UNCACHED,
+// };
+
+struct file_bucket 
 {
+	u32 key;
+	bucket_tag tag;
+
 	char fileName[FILE_PATH_LEN];
-	char* contentHandle;
-	usize fileSize;
+	char* content;
+	usize contentLen;
+	// cache_status status;
 };
 
 // TODO(louis): 
@@ -29,14 +40,18 @@ struct file_handle_entry
 struct file_cache
 {
 	pthread_mutex_t guard;
+
+	i32 minDIB;
+	u32 maxDIB;
 	u32 len;
-	file_handle_entry handles[MAX_STATIC_FILES];
-	arena_allocator* fileCacheMemory;
+
+	file_bucket buckets[HASH_TABLE_M];
+	arena_allocator* alloc;
 };
 
 i16 init(file_cache*, arena_allocator*);
 i16 destroy(file_cache*);
-i16 get(file_handle_entry*, file_cache*, string*);
-i16 push(file_cache*, char*, usize);
+i16 get(file_bucket*, file_cache*, string*);
+i16 insert(file_cache*, char*, usize, char*, usize);
 i16 buildStaticCache(file_cache*);
 #endif 
