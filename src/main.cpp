@@ -135,11 +135,23 @@ void handleGetRequest(http_response* result, http_request* request,
 					  file_cache* fileCache, arena_allocator* alloc)
 {
 	file_bucket file;
-	// TODO(louis): Make sure that this is actually safe
-	request->requestTarget.ptr++;
-	request->requestTarget.len--;
+	
+	string requestTarget = request->requestTarget;
+
+	if (*requestTarget.ptr == '/')
+	{
+		++requestTarget.ptr;
+		--requestTarget.len;
+	}
+
+	if (requestTarget.len == 0)
+	{
+		initEmptyResponse(result, NOT_FOUND);
+		return;
+	}
+
 	// TODO(louis): Should we acquire the mutex every time? Writes to the file cache are very rare.
-	if (get(&file, fileCache, &request->requestTarget) <= 0)
+	if (get(&file, fileCache, &requestTarget) <= 0)
 	{
 		initEmptyResponse(result, NOT_FOUND);
 		return;
