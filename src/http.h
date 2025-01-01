@@ -7,12 +7,6 @@
 
 #define CORRUPTED_HEADER -1
 
-#define DEFINE_STRING(name, value) \
-constexpr string name = \
-{ \
-	(char*) value, \
-	sizeof(value) - 1 \
-}; \
 
 #define DEFINE_STATUS_LINE(name, statusCode) \
 constexpr char name[] = HTTP/1.1 200 ## statusCode; \
@@ -43,6 +37,10 @@ constexpr char INTERNAL_SERVER_ERROR_RESPONSE[] = "HTTP/1.1 500 ";
 constexpr char NOT_IMPLEMENTED_RESPONSE[] = "HTTP/1.1 501 ";
 constexpr u32 DEFAULT_RESPONSE_LEN = sizeof(OK_RESPONSE) - 1;
 
+constexpr char HTTP_VERSION_PREFIX[] = "HTTP/";
+constexpr u32 HTTP_VERSION_PREFIX_LEN = sizeof(HTTP_VERSION_PREFIX) - 1;
+
+DEFINE_STRING(HTTP_VERSION_PREFIX_STRING, "HTTP/");
 DEFINE_STRING(ZERO_LEN, "0");
 DEFINE_STRING(TRANSFER_ENCODING_HEADER_NAME, "Transfer-Encoding");
 DEFINE_STRING(CONTENT_LENGTH_HEADER_NAME, "Content-Length"); 

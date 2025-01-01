@@ -10,19 +10,50 @@ struct string
 	isize len;
 };
 
+#define DEFINE_STRING(name, value) \
+constexpr string name = \
+{ \
+	(char*) value, \
+	sizeof(value) - 1 \
+}; \
+
+// NOTE(louis): The caller has to ensures that the length of the haystack is at least the length of the literal.
+#define CONST_MEMEQL(name, literal) \
+bool name(char* haystack) \
+{ \
+	for (int i = 0; i < sizeof(literal) - 1; ++i, ++haystack) \
+	{ \
+		if (*haystack != literal[i]) \
+	  		return false; \
+	} \
+	return true; \
+} \
+
+#define CONST_FINDMEM(name, literal) \
+char* name(char* haystack, usize len) \
+{ \
+	for (int i = 0; i <= len - (sizeof(literal) - 1); ++i, ++haystack) \
+	{ \
+	  	char* tmp = haystack; \
+	  	bool isEql = true; \
+		for (int j = 0; j < sizeof(literal) - 1; ++j, ++tmp)  \
+	  	{ \
+	  		if (*tmp != literal[j]) \
+	   		{ \
+				isEql = false; \
+	  			break; \
+	  		} \
+	  	} \
+		if (isEql) \
+			return haystack; \
+	} \
+	return NULL; \
+} 
+
 #define FILE_PATH_LEN 256
 
-constexpr char HTTP_VERSION_PREFIX[] = "HTTP/";
-constexpr u32 HTTP_VERSION_PREFIX_LEN = sizeof(HTTP_VERSION_PREFIX) - 1;
-
-constexpr string HTTP_VERSION_PREFIX_STRING =
-{
-	(char*) HTTP_VERSION_PREFIX,
-	HTTP_VERSION_PREFIX_LEN
-};
-
 constexpr char CRLF[] = "\r\n";
-constexpr u32 CRLF_LEN = sizeof(CRLF) - 1;
+constexpr u8 CRLF_LEN = sizeof(CRLF) - 1;
 
 constexpr char SP = ' ';
 
@@ -36,19 +67,9 @@ constexpr u32 PUT_METHOD_NAME_LEN = sizeof(PUT_METHOD_NAME) - 1;
 
 
 bool stringEql(string*, string*);
-
 bool memEql(char*, char*, usize);
-bool memEqlGet(char*);
-bool memEqlPost(char*);
-bool memEqlPut(char*);
-bool memEqlCrlf(char*);
-bool memEqlHttpVersionPrefix(char*);
-
 char* memFindChr(char*, usize, u8);
-char* memFindCrlf(char*, usize);
-char* memFind2Crlf(char*, usize);
 char* memFindMem(char*, usize, char*, usize);
-
 void memCpy(char*, char*, usize);
 
 #endif

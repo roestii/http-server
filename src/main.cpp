@@ -34,6 +34,7 @@
 #include "http.h"
 #include "authentication.h"
 #include "articles.h"
+#include "sqlite3.h"
 
 constexpr u8 N_THREADS = 1;
 constexpr u16 MAX_N_PENDING_CONNECTIONS = 128;
@@ -54,6 +55,21 @@ constexpr usize THREAD_LOCAL_MEMORY = (MEMORY_LIMIT - FILE_CACHE_LIMIT) / N_THRE
 #ifndef AUTH_HASH_PATH
 #define AUTH_HASH_PATH "auth.conf"
 #endif
+
+#ifndef DATABASE_PATH
+#define DATABASE_PATH "users.db"
+#endif
+
+#define INSERT_STMT "insert into users(email) values(?)"
+#define EMAIL_PREFIX "email="
+// TODO(louis):
+// 		- create a character encoding table
+#define AT_ENCODING "%40"
+#define MIN_EMAIL_LEN 2 + sizeof(AT_ENCODING) - 1
+
+
+
+CONST_MEMEQL(memEqlEmailPrefix, EMAIL_PREFIX);
 
 pthread_mutex_t killMutex;
 pthread_cond_t killSignal;
@@ -170,7 +186,21 @@ void handleGetRequest(http_response* result, http_request* request,
 	insert(&result->headerMap, (string*) &CONTENT_LENGTH_HEADER_NAME, &contentLengthValue);
 }
 
-void handlePostRequest(http_response* result, http_request* request, arena_allocator* alloc)
+i16 validateEmail(string* email)
+{
+	char* atPtr = memFindMem(email->ptr, email->len, (char*) AT_ENCODING, sizeof(AT_ENCODING) - 1);
+	if (!atPtr)
+		return 0;
+
+	u32 nameLen = atPtr - email->ptr;
+	u32 domainLen = email->len - nameLen - (sizeof(AT_ENCODING) - 1);
+
+	return nameLen != 0 && domainLen != 0;
+}
+
+// TODO(louis): introduce error handling in case the database fails.
+void handlePostRequest(http_response* result, http_request* request, 
+					   arena_allocator* alloc, sqlite3* db, sqlite3_stmt* stmt)
 {
 	// NOTE(louis): the caller has to ensure that the headerMap of the result was initialized.
 	string transferCoding;
@@ -206,6 +236,60 @@ void handlePostRequest(http_response* result, http_request* request, arena_alloc
 		{
 			initEmptyResponse(result, OK);
 			insert(&result->headerMap, (string*) &CONTENT_LENGTH_HEADER_NAME, (string*) &ZERO_LEN);
+
+			if (messageBody.len < sizeof(EMAIL_PREFIX) - 1 + MIN_EMAIL_LEN)
+			{
+				initEmptyResponse(result, BAD_REQUEST);
+				return;
+			}
+
+			if (!memEqlEmailPrefix(messageBody.ptr))
+			{
+				initEmptyResponse(result, BAD_REQUEST);
+				return;
+			}
+
+			string email = 
+			{
+				messageBody.ptr + sizeof(EMAIL_PREFIX) - 1,
+				messageBody.len - (isize) (sizeof(EMAIL_PREFIX) - 1)
+			};
+		
+			if (!validateEmail(&email))
+			{
+				initEmptyResponse(result, BAD_REQUEST);
+				return;
+			}
+	
+			// TODO(louis): How do we handle broken statements? 
+			
+			i32 rc = sqlite3_bind_text(stmt, 1, email.ptr, email.len, SQLITE_STATIC);
+			if (rc != SQLITE_OK)
+			{
+				initEmptyResponse(result, INTERNAL_SERVER_ERROR);
+				return;
+			}
+
+			rc = sqlite3_step(stmt);
+			if (rc != SQLITE_DONE)
+			{
+				initEmptyResponse(result, INTERNAL_SERVER_ERROR);
+				return;
+			}
+
+			rc = sqlite3_reset(stmt);
+			if (rc != SQLITE_OK)
+			{
+				initEmptyResponse(result, INTERNAL_SERVER_ERROR);
+				return;
+			}
+
+			rc = sqlite3_clear_bindings(stmt);
+			if (rc != SQLITE_OK)
+			{
+				initEmptyResponse(result, INTERNAL_SERVER_ERROR);
+				return;
+			}
 		}
 		else
 		{
@@ -306,6 +390,7 @@ struct handle_request_args
 	arena_allocator* requestLocalMemory;
 	i32 socketDescriptor;
 	articles_resource* resource;
+	sqlite3* db;
 #if TLS
 	SSL_CTX* ctx;
 #endif
@@ -318,11 +403,20 @@ void* handleRequests(void* args)
 	arena_allocator* requestLocalMemory = handleRequestArgs->requestLocalMemory;
 	i32 socketDescriptor = handleRequestArgs->socketDescriptor;
 	articles_resource* resource = handleRequestArgs->resource;
+	sqlite3* db = handleRequestArgs->db;
 
 #if TLS
 	SSL_CTX* ctx = handleRequestArgs->ctx;
 	SSL* ssl = NULL;
 #endif
+
+	char* errMsg;
+	int rc;
+
+	sqlite3_stmt* stmt;
+	rc = sqlite3_prepare_v2(db, INSERT_STMT, sizeof(INSERT_STMT), &stmt, NULL);
+	if (rc != SQLITE_OK)
+		return NULL;
 
 	http_request request;
 	http_response response;
@@ -448,7 +542,7 @@ void* handleRequests(void* args)
 			}
 			case POST:
 			{
-				handlePostRequest(&response, &request, requestLocalMemory);
+				handlePostRequest(&response, &request, requestLocalMemory, db, stmt);
 #if TLS
 				if (writeResponse(ssl, &response, &writer) == -1)
 #else
@@ -587,14 +681,24 @@ i16 serve(u16 port)
 		pthread_t threadHandles[N_THREADS];
 		arena_allocator requestLocalMemory[N_THREADS];
 		handle_request_args workerArgs[N_THREADS];
+		sqlite3* dbConns[N_THREADS];
 
 		pthread_t* currentThreadHandle = threadHandles;
 		arena_allocator* currentAlloc = requestLocalMemory;
 		handle_request_args* currentArg = workerArgs;
+		sqlite3** currentDb = dbConns;
+
 		for (int i = 0; 
 			 i < N_THREADS; 
-			 ++i, ++currentThreadHandle, ++currentAlloc, ++currentArg)
+			 ++i, ++currentThreadHandle, 
+			 ++currentAlloc, ++currentArg, ++currentDb)
 		{
+			if (sqlite3_open(DATABASE_PATH, currentDb) != SQLITE_OK)
+			{
+				retval = -1;
+				goto server_clean_up;
+			}
+
 			if (subarena(currentAlloc, &programMemory, THREAD_LOCAL_MEMORY) == -1)
 			{
 				retval = -1;
@@ -605,6 +709,7 @@ i16 serve(u16 port)
 			currentArg->socketDescriptor = socketDescriptor;
 			currentArg->requestLocalMemory = currentAlloc;
 			currentArg->resource = &resource;
+			currentArg->db = *currentDb;
 #if TLS
 			currentArg->ctx = ctx;
 #endif
@@ -626,6 +731,8 @@ i16 serve(u16 port)
 		{
 			if (pthread_kill(threadHandles[i], 0) != 0)
 				retval = -1;
+
+			sqlite3_close(dbConns[i]);
 		}
 
 		destroy(&fileCache);

@@ -1,5 +1,6 @@
 *.conf
 *.pem
 *.o
+*.db
 http_server
 

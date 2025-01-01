@@ -6,6 +6,16 @@
 
 constexpr u8 MAX_DIGITS_U8 = 3;
 
+CONST_MEMEQL(memEqlGet, "GET");
+CONST_MEMEQL(memEqlPost, "POST");
+CONST_MEMEQL(memEqlPut, "PUT");
+CONST_MEMEQL(memEqlCrlf, "\r\n");
+CONST_MEMEQL(memEqlHttpVersionPrefix, "HTTP/");
+
+CONST_FINDMEM(memFindCrlf, "\r\n");
+CONST_FINDMEM(memFind2Crlf, "\r\n\r\n");
+
+
 void initEmptyResponse(http_response* result, http_status_code statusCode)
 {
 	result->statusCode = statusCode;

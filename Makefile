@@ -7,15 +7,16 @@ CFLAGS += -DTLS=1
 LINK_SSL = -lssl
 endif 
 
-
-
 ifeq ($(DEBUG_MODE), 1)
 CFLAGS += -DDEBUG_MODE=1
 CFLAGS += -g
 endif
 
-http_server: main.o http.o mem.o arena_allocator.o http_header_map.o string.o file_cache.o authentication.o articles.o linked_list_allocator.o
-	$(CC) $(CFLAGS) $(LINK_SSL) -lcrypto -o http_server main.o http.o mem.o arena_allocator.o http_header_map.o string.o file_cache.o authentication.o articles.o linked_list_allocator.o
+http_server: main.o http.o mem.o arena_allocator.o http_header_map.o string.o file_cache.o authentication.o articles.o linked_list_allocator.o sqlite3.o
+	$(CC) $(CFLAGS) $(LINK_SSL) -lcrypto -o http_server main.o http.o mem.o arena_allocator.o http_header_map.o string.o file_cache.o authentication.o articles.o linked_list_allocator.o sqlite3.o
+
+sqlite3.o: src/sqlite3.c src/sqlite3.h
+	$(CC) -DSQLITE_THREADSAFE=2 -c src/sqlite3.c
 
 mem.o: src/mem.cpp src/mem.h src/types.h
 	$(CC) $(CFLAGS) -c src/mem.cpp
@@ -50,7 +51,7 @@ http.o: src/http.cpp src/http.h src/mem.h src/types.h
 authentication.o: src/authentication.cpp src/authentication.h src/mem.h src/types.h
 	$(CC) $(CFLAGS) -c src/authentication.cpp 
 
-main.o: src/main.cpp src/http.h src/types.h src/file_cache.h src/arena_allocator.h src/http_header_map.h src/authentication.h src/articles.h
+main.o: src/main.cpp src/http.h src/types.h src/file_cache.h src/arena_allocator.h src/http_header_map.h src/authentication.h src/articles.h src/sqlite3.h
 	$(CC) $(CFLAGS) -c src/main.cpp
 
 clean:
