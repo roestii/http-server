@@ -60,14 +60,16 @@ constexpr usize THREAD_LOCAL_MEMORY = (MEMORY_LIMIT - FILE_CACHE_LIMIT) / N_THRE
 #define DATABASE_PATH "users.db"
 #endif
 
+// #ifndef LOG_PATH 
+// #define LOG_PATH "/var/log/http_server/http_server.log"
+// #endif
+
 #define INSERT_STMT "insert into users(email) values(?)"
 #define EMAIL_PREFIX "email="
 // TODO(louis):
 // 		- create a character encoding table
 #define AT_ENCODING "%40"
 #define MIN_EMAIL_LEN 2 + sizeof(AT_ENCODING) - 1
-
-
 
 CONST_MEMEQL(memEqlEmailPrefix, EMAIL_PREFIX);
 
@@ -83,6 +85,9 @@ typedef SSL* write_handle;
 #define sockWrite(a, b, c) write(a, b, c)
 typedef i32 write_handle;
 #endif
+
+// FILE* logStream = stderr;
+#define log(msg, ...) fprintf(stderr, msg __VA_OPT__(,) __VA_ARGS__)
 
 u8 putPasswdHash[SHA256_DIGEST_LENGTH];
 
@@ -199,7 +204,7 @@ i16 validateEmail(string* email)
 }
 
 // TODO(louis): introduce error handling in case the database fails.
-void handlePostRequest(http_response* result, http_request* request, 
+i32 handlePostRequest(http_response* result, http_request* request, 
 					   arena_allocator* alloc, sqlite3* db, sqlite3_stmt* stmt)
 {
 	// NOTE(louis): the caller has to ensure that the headerMap of the result was initialized.
@@ -211,11 +216,15 @@ void handlePostRequest(http_response* result, http_request* request,
 								   CONTENT_LENGTH_HASH, (string*) &CONTENT_LENGTH_HEADER_NAME);
 
 	if (hasTransferCoding && hasContentLength)
-		// TODO(louis): send some response
-		// The version and the header map should already be initialized.
+	{
 		initEmptyResponse(result, BAD_REQUEST);
+		return 0;
+	}
 	else if (hasTransferCoding)
+	{
 		initEmptyResponse(result, NOT_IMPLEMENTED);
+		return 0;
+	}
 	else if (hasContentLength)
 	{
 		string messageBody = request->messageBody;
@@ -223,13 +232,13 @@ void handlePostRequest(http_response* result, http_request* request,
 		if (strToU64(&contentLengthInt, &contentLength) == -1)
 		{
 			initEmptyResponse(result, BAD_REQUEST);
-			return;
+			return 0;
 		}
 
 		if (contentLengthInt > messageBody.len)
 		{
 			initEmptyResponse(result, TOO_LARGE);
-			return;
+			return 0;
 		}
 
 		if (stringEql(&request->requestTarget, (string*) &NEWSLETTER_SIGNUP_ROUTE))
@@ -240,13 +249,13 @@ void handlePostRequest(http_response* result, http_request* request,
 			if (messageBody.len < sizeof(EMAIL_PREFIX) - 1 + MIN_EMAIL_LEN)
 			{
 				initEmptyResponse(result, BAD_REQUEST);
-				return;
+				return 0;
 			}
 
 			if (!memEqlEmailPrefix(messageBody.ptr))
 			{
 				initEmptyResponse(result, BAD_REQUEST);
-				return;
+				return 0;
 			}
 
 			string email = 
@@ -258,7 +267,7 @@ void handlePostRequest(http_response* result, http_request* request,
 			if (!validateEmail(&email))
 			{
 				initEmptyResponse(result, BAD_REQUEST);
-				return;
+				return 0;
 			}
 	
 			// TODO(louis): How do we handle broken statements? 
@@ -266,41 +275,49 @@ void handlePostRequest(http_response* result, http_request* request,
 			i32 rc = sqlite3_bind_text(stmt, 1, email.ptr, email.len, SQLITE_STATIC);
 			if (rc != SQLITE_OK)
 			{
+				log("Cannot bind text paramater to sqlite statement.\n");
 				initEmptyResponse(result, INTERNAL_SERVER_ERROR);
-				return;
+				return rc;
 			}
 
 			rc = sqlite3_step(stmt);
 			if (rc != SQLITE_DONE)
 			{
+				log("Cannot execute statement insert statement.\n");
 				initEmptyResponse(result, INTERNAL_SERVER_ERROR);
-				return;
+				return rc;
 			}
 
 			rc = sqlite3_reset(stmt);
 			if (rc != SQLITE_OK)
 			{
+				log("Cannot reset statement.\n");
 				initEmptyResponse(result, INTERNAL_SERVER_ERROR);
-				return;
+				return rc;
 			}
 
 			rc = sqlite3_clear_bindings(stmt);
 			if (rc != SQLITE_OK)
 			{
+				log("Cannot clear statment bindings.\n");
 				initEmptyResponse(result, INTERNAL_SERVER_ERROR);
-				return;
+				return rc;
 			}
+
+			return 0;
 		}
 		else
 		{
 			initEmptyResponse(result, NOT_FOUND);
-			return;
+			return 0;
 		}
 	}
 	else
+	{
 		initEmptyResponse(result, BAD_REQUEST);
+		return 0;
+	}
 }
-
 
 void handlePutRequest(http_response* result, http_request* request, 
 					  arena_allocator* alloc, articles_resource* resource)
@@ -411,7 +428,7 @@ void* handleRequests(void* args)
 #endif
 
 	char* errMsg;
-	int rc;
+	i32 rc;
 
 	sqlite3_stmt* stmt;
 	rc = sqlite3_prepare_v2(db, INSERT_STMT, sizeof(INSERT_STMT), &stmt, NULL);
@@ -542,7 +559,13 @@ void* handleRequests(void* args)
 			}
 			case POST:
 			{
-				handlePostRequest(&response, &request, requestLocalMemory, db, stmt);
+				i32 rc = handlePostRequest(&response, &request, requestLocalMemory, db, stmt);
+				if (rc != SQLITE_OK)
+				{
+					// TODO(louis):
+					assert(!"The database is broken, handle it properly...");
+				}
+
 #if TLS
 				if (writeResponse(ssl, &response, &writer) == -1)
 #else
@@ -593,19 +616,19 @@ i16 serve(u16 port)
 	SSL_CTX* ctx = SSL_CTX_new(TLS_server_method());
 	if (!ctx)
 	{
-		fprintf(stderr, "Cannot aquire ssl context.\n");
+		log("Cannot aquire ssl context.\n");
 		return -1;
 	}
 
 	if (SSL_CTX_use_certificate_chain_file(ctx, CERT_PATH) <= 0)
 	{
-		fprintf(stderr, "Cannot load certificate.\n");
+		log("Cannot load ssl certificate.\n");
 		return -1;
 	}
 
 	if (SSL_CTX_use_PrivateKey_file(ctx, PRIVATE_KEY_PATH, SSL_FILETYPE_PEM) <= 0)
 	{
-		fprintf(stderr, "Cannot load private key.\n");
+		log("Cannot load private key.\n");
 		return -1;
 	}
 #endif
@@ -615,25 +638,24 @@ i16 serve(u16 port)
 		return -1;
 
 	arena_allocator programMemory;
-	// TODO(louis): Fix this probably wrong order
 	if (init(&programMemory, MEMORY_LIMIT) == -1)
-		return -1;
+		assert(!"Cannot acquire memory.\n");
 
 	arena_allocator fileCacheMemory;
 	if (subarena(&fileCacheMemory, &programMemory, FILE_CACHE_LIMIT) == -1)
-		return -1;
+		assert(!"Cannot instantiate subarena.\n");
 
 	i32 socketDescriptor = socket(AF_INET, SOCK_STREAM, 0);
 	if (socketDescriptor == -1)
+	{
+		log("Cannot open socket.\n");
 		return -1;
+	}
 
 	i32 optval = 1;
 	struct sockaddr_in socketAddr;
 	if (!inet_pton(AF_INET, "0.0.0.0", &socketAddr.sin_addr))
-	{
-		retval = -1;
-		goto server_clean_up;
-	}
+		assert(!"Invalid ip address.\n");
 
 	socketAddr.sin_family = AF_INET;
 	socketAddr.sin_port = htons(port);
@@ -642,6 +664,7 @@ i16 serve(u16 port)
 	if (setsockopt(socketDescriptor, SOL_SOCKET, 
 			   	   SO_REUSEADDR, &optval, sizeof(optval)) == -1)
 	{
+		log("Cannot set socket option as reuseaddr.\n");
 		retval = -1;
 		goto server_clean_up;
 	}
@@ -651,12 +674,14 @@ i16 serve(u16 port)
 		 	 (struct sockaddr*) &socketAddr, 
 		  	 sizeof(socketAddr)) == -1)
 	{
+		log("Cannot bind to address.\n");
 		retval = -1;
 		goto server_clean_up;
 	}
 
 	if (listen(socketDescriptor, MAX_N_PENDING_CONNECTIONS) == -1)
 	{
+		log("Cannot listen on socket bound to address.\n");
 		retval = -1;
 		goto server_clean_up;
 	}
@@ -665,12 +690,14 @@ i16 serve(u16 port)
 		file_cache fileCache;
 		if (init(&fileCache, &fileCacheMemory) == -1)
 		{
+			log("Cannot initialize file cache.\n");
 			retval = -1;
 			goto server_clean_up;
 		}
 
 		if (buildStaticCache(&fileCache) == -1)
 		{
+			log("Cannot build file cache.\n");
 			retval = -1;
 			goto server_clean_up;
 		}
@@ -695,15 +722,13 @@ i16 serve(u16 port)
 		{
 			if (sqlite3_open(DATABASE_PATH, currentDb) != SQLITE_OK)
 			{
+				log("Cannot open database file.\n");
 				retval = -1;
 				goto server_clean_up;
 			}
 
 			if (subarena(currentAlloc, &programMemory, THREAD_LOCAL_MEMORY) == -1)
-			{
-				retval = -1;
-				goto server_clean_up;
-			}
+				assert(!"Unable to instantiate subarena");
 
 			currentArg->fileCache = &fileCache;
 			currentArg->socketDescriptor = socketDescriptor;
@@ -716,6 +741,7 @@ i16 serve(u16 port)
 
 			if (pthread_create(currentThreadHandle, NULL, handleRequests, (void*) currentArg) != 0)
 			{
+				log("Unable to create thread.\n");
 				retval = -1;
 				goto server_clean_up;
 			}
@@ -723,6 +749,7 @@ i16 serve(u16 port)
 
 		if (pthread_cond_wait(&killSignal, &killMutex) != 0)
 		{
+			log("Unable to wait on cond.\n");
 			retval = -1;
 			goto server_clean_up;
 		}
@@ -732,7 +759,8 @@ i16 serve(u16 port)
 			if (pthread_kill(threadHandles[i], 0) != 0)
 				retval = -1;
 
-			sqlite3_close(dbConns[i]);
+			if (sqlite3_close(dbConns[i]) != SQLITE_OK)
+				retval = -1;
 		}
 
 		destroy(&fileCache);
@@ -754,15 +782,24 @@ i16 loadEnv()
 	i16 retval = 0;
 	i32 fd = open(AUTH_HASH_PATH, O_RDONLY);
 	if (fd == -1)
+	{
+		log("Cannot open auth config.\n");
 		return -1;
+	}
 
 	char passwdHashStr[2 * SHA256_DIGEST_LENGTH];
 	i32 n = read(fd, (void*) passwdHashStr, sizeof(passwdHashStr));
 	if (n != sizeof(passwdHashStr))
+	{
+		log("Unable to read password hash from auth config.\n");
 		retval = -1;
+	}
 
 	if (hexdecodeSHA256(putPasswdHash, passwdHashStr) == -1)
+	{
+		log("Invalid auth config format.");
 		retval = -1;
+	}
 
 	if (close(fd) == -1)
 		retval = -1;
@@ -774,9 +811,13 @@ i32 main(i32 argc, char** argv)
 {
 	if (loadEnv() == -1)
 	{
-		fprintf(stderr, "Cannot read authentication config.\n");
+		log("Cannot read authentication config.\n");
 		return -1;
 	}
+
+	// log = fopen(LOG_PATH, "a");
+	// if (!log)
+	// 	return -1;
 
 	if (pthread_mutex_init(&killMutex, NULL) != 0)
 		return -1;
@@ -787,13 +828,15 @@ i32 main(i32 argc, char** argv)
 
 	if (signal(SIGINT, signalHandler) == SIG_ERR) 
 	{
-		fprintf(stderr, "Error while setting signal handler: %d\n", errno);
+		log("Error while setting signal handler: %d\n", errno);
 		return -1;
 	}
 
 	i16 retval = 0;
 	if (serve(PORT) == -1)
 		retval = -1;
+
+	// fclose(log);
 
 	if (pthread_cond_destroy(&killSignal) != 0)
 		retval = -1;
