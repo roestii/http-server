@@ -41,7 +41,7 @@ struct file_cache
 {
 	pthread_mutex_t guard;
 
-	i32 minDIB;
+	// i32 minDIB;
 	u32 maxDIB;
 	u32 len;
 

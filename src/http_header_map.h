@@ -17,7 +17,7 @@ struct http_header_bucket
 struct http_header_map
 {
 	// for the round robin implementation
-	i32 minDIB;
+	// i32 minDIB;
 	u32 maxDIB;
 
 	u32 len;

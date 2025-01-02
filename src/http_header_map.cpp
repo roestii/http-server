@@ -3,7 +3,7 @@
 void init(http_header_map* result)
 {
 	result->len = 0;
-	result->minDIB = -1;
+	// result->minDIB = -1;
 	result->maxDIB = 0;
 
 	// TODO(louis): handle allocation error
@@ -31,9 +31,9 @@ i16 insert(http_header_map* headerMap, string* fieldName, string* fieldValue)
 	// TODO(louis): consider using hashing by multiplication and a 
 	// table size that is a power of two.
 	u32 key = hash(fieldName);
-	u32 probePosition = headerMap->minDIB;
-	if (probePosition == -1)
-		probePosition = 0;
+	u32 probePosition = 0;
+	// if (probePosition == -1)
+	// 	probePosition = 0;
 	for (;; ++probePosition)
 	{
 		u32 location = (key + probePosition) & (HASH_TABLE_M - 1);
@@ -51,8 +51,8 @@ i16 insert(http_header_map* headerMap, string* fieldName, string* fieldValue)
 				if (probePosition > headerMap->maxDIB)
 					headerMap->maxDIB = probePosition;
 
-				if (headerMap->minDIB == -1 || probePosition < headerMap->minDIB)
-					headerMap->minDIB = probePosition;
+				// if (headerMap->minDIB == -1 || probePosition < headerMap->minDIB)
+				// 	headerMap->minDIB = probePosition;
 
 				++headerMap->len;
 				return 0;
@@ -89,9 +89,9 @@ i16 insert(http_header_map* headerMap, string* fieldName, string* fieldValue)
 i16 get(string* result, http_header_map* headerMap, string* fieldName)
 {
 	u32 key = hash(fieldName);
-	u32 probePosition = headerMap->minDIB;
-	if (probePosition < 0)
-		probePosition = 0;
+	u32 probePosition = 0;
+	// if (probePosition < 0)
+	// 	probePosition = 0;
 	for (;probePosition <= headerMap->maxDIB; ++probePosition)
 	{
 		u32 location = (key + probePosition) & (HASH_TABLE_M - 1);
@@ -120,9 +120,9 @@ i16 get(string* result, http_header_map* headerMap, string* fieldName)
 i16 del(http_header_map* headerMap, string* fieldName)
 {
 	u32 key = hash(fieldName);
-	u32 probePosition = headerMap->minDIB;
-	if (probePosition < 0)
-		probePosition = 0;
+	u32 probePosition = 0;
+	// if (probePosition < 0)
+	// 	probePosition = 0;
 
 	for (;probePosition <= headerMap->maxDIB; ++probePosition)
 	{
@@ -153,9 +153,9 @@ i16 del(http_header_map* headerMap, string* fieldName)
 i16 getHash(string* result, http_header_map* headerMap, u64 digest, string* fieldName)
 {
 	u32 key = digest & (HASH_TABLE_M - 1);
-	u32 probePosition = headerMap->minDIB;
-	if (probePosition < 0)
-		probePosition = 0;
+	u32 probePosition = 0;
+	// if (probePosition < 0)
+	// 	probePosition = 0;
 	for (;probePosition <= headerMap->maxDIB; ++probePosition)
 	{
 		u32 location = (key + probePosition) & (HASH_TABLE_M - 1);
@@ -184,9 +184,9 @@ i16 getHash(string* result, http_header_map* headerMap, u64 digest, string* fiel
 i16 delHash(http_header_map* headerMap, u64 digest, string* fieldName)
 {
 	u32 key = digest & (HASH_TABLE_M - 1);
-	u32 probePosition = headerMap->minDIB;
-	if (probePosition < 0)
-		probePosition = 0;
+	u32 probePosition = 0;
+	// if (probePosition < 0)
+	// 	probePosition = 0;
 
 	for (;probePosition <= headerMap->maxDIB; ++probePosition)
 	{

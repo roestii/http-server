@@ -102,7 +102,7 @@ i16 init(file_cache* fileCache, arena_allocator* alloc)
 		return -1;
 	fileCache->alloc = alloc;
 	fileCache->len = 0;
-	fileCache->minDIB = -1;
+	// fileCache->minDIB = -1;
 	fileCache->maxDIB = 0;
 
 	file_bucket* currentBucket = fileCache->buckets;
@@ -135,9 +135,9 @@ i16 insert(file_cache* fileCache, char* fileName,
 
 	file_bucket* buckets = fileCache->buckets;
 	u32 key = strnHash(fileName, FILE_PATH_LEN);
-	u32 probePosition = fileCache->minDIB;
-	if (probePosition == -1)
-		probePosition = 0;
+	u32 probePosition = 0; /* fileCache->minDIB */
+	// if (probePosition == -1)
+	// 	probePosition = 0;
 	for (;; ++probePosition)
 	{
 		u32 location = (key + probePosition) & (HASH_TABLE_M - 1);
@@ -157,8 +157,8 @@ i16 insert(file_cache* fileCache, char* fileName,
 				if (probePosition > fileCache->maxDIB)
 					fileCache->maxDIB = probePosition;
 
-				if (fileCache->minDIB == -1 || probePosition < fileCache->minDIB)
-					fileCache->minDIB = probePosition;
+				// if (fileCache->minDIB == -1 || probePosition < fileCache->minDIB)
+				// 	fileCache->minDIB = probePosition;
 
 				++fileCache->len;
 				assert(pthread_mutex_unlock(&fileCache->guard) == 0);
@@ -219,9 +219,9 @@ i16 get(file_bucket* result, file_cache* fileCache, string* fileName)
 	assert(pthread_mutex_lock(&fileCache->guard) == 0);
 
 	u32 key = hash(fileName);
-	u32 probePosition = fileCache->minDIB;
-	if (probePosition < 0)
-		probePosition = 0;
+	u32 probePosition = 0;
+	// if (probePosition < 0)
+	// 	probePosition = 0;
 	for (;probePosition <= fileCache->maxDIB; ++probePosition)
 	{
 		u32 location = (key + probePosition) & (HASH_TABLE_M - 1);
@@ -233,7 +233,6 @@ i16 get(file_bucket* result, file_cache* fileCache, string* fileName)
 			{
 				if (fileNameCmp(fileName, probeBucket->fileName))
 				{ 
-
 					/*
 					if (probeBucket->status == UNCACHED)
 					{
