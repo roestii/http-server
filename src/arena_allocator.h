@@ -5,7 +5,7 @@
 
 struct arena_allocator
 {
-	void* start;
+	uintptr start;
 	usize len;
 	usize offset;
 };
@@ -13,6 +13,7 @@ struct arena_allocator
 i16 init(arena_allocator*, usize);
 i16 subarena(arena_allocator*, arena_allocator*, usize);
 i16 destroy(arena_allocator*);
+void consume(arena_allocator*, arena_allocator*);
 
 void reset(arena_allocator*);
 void* allocate(arena_allocator*, usize);

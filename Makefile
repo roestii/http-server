@@ -12,8 +12,8 @@ CFLAGS += -DDEBUG_MODE=1
 CFLAGS += -g
 endif
 
-http_server: main.o http.o mem.o arena_allocator.o http_header_map.o string.o file_cache.o authentication.o articles.o linked_list_allocator.o sqlite3.o
-	$(CC) $(CFLAGS) $(LINK_SSL) -lcrypto -o http_server main.o http.o mem.o arena_allocator.o http_header_map.o string.o file_cache.o authentication.o articles.o linked_list_allocator.o sqlite3.o
+http_server: main.o http.o mem.o arena_allocator.o http_header_map.o string.o file_cache.o authentication.o articles.o linked_list_allocator.o sqlite3.o pool_allocator.o 
+	$(CC) $(CFLAGS) $(LINK_SSL) -lcrypto -o http_server main.o http.o mem.o arena_allocator.o http_header_map.o string.o file_cache.o authentication.o articles.o linked_list_allocator.o sqlite3.o pool_allocator.o
 
 sqlite3.o: src/sqlite3.c src/sqlite3.h
 	$(CC) -DSQLITE_THREADSAFE=2 -c src/sqlite3.c
@@ -33,6 +33,9 @@ string.o: src/string.cpp src/string.h src/types.h
 file_cache.o: src/file_cache.cpp src/file_cache.h src/types.h src/mem.h src/hash.h src/linked_list_allocator.h
 	$(CC) $(CFLAGS) -c src/file_cache.cpp
 
+pool_allocator.o: src/pool_allocator.cpp src/pool_allocator.h src/types.h
+	$(CC) $(CFLAGS) -c src/pool_allocator.cpp
+
 arena_allocator.o: src/arena_allocator.cpp src/arena_allocator.h src/types.h
 	$(CC) $(CFLAGS) -c src/arena_allocator.cpp
 
@@ -51,7 +54,7 @@ http.o: src/http.cpp src/http.h src/mem.h src/types.h
 authentication.o: src/authentication.cpp src/authentication.h src/mem.h src/types.h
 	$(CC) $(CFLAGS) -c src/authentication.cpp 
 
-main.o: src/main.cpp src/http.h src/types.h src/file_cache.h src/arena_allocator.h src/http_header_map.h src/authentication.h src/articles.h src/sqlite3.h
+main.o: src/main.cpp src/http.h src/types.h src/file_cache.h src/arena_allocator.h src/http_header_map.h src/authentication.h src/articles.h src/sqlite3.h src/pool_allocator.h
 	$(CC) $(CFLAGS) -c src/main.cpp
 
 clean:

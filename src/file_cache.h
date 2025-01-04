@@ -31,7 +31,6 @@ struct file_bucket
 };
 
 // TODO(louis): 
-// 		- Consider making this a hashmap
 // 		- what if a file didn't fit into the cache at initialization, 
 // 		  then we return 404 at the moment which is not what we want...
 // 		- we probably need a general purpose allocator for this

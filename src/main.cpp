@@ -9,9 +9,13 @@
 // 	- afl fuzzing
 // 	- put requests for putting blog posts on there (with authentication)
 // 	- templating for blog posts, and updates to cached blog overview page
-// 	- database connection for newsletter signup (libpq)
+// 	- pool allocator for file cache
+// 	- implement conncection: close header for bad request things, and also handle connection close messages
+// 	- insert actual @ rather that %40 into database 
 
 #include <sys/socket.h>
+#include <sys/epoll.h>
+#include <sys/timerfd.h>
 #include <arpa/inet.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -21,6 +25,7 @@
 #include <netdb.h>
 #include <pthread.h>
 #include <fcntl.h>
+#include <time.h>
 
 #if TLS
 #include <openssl/ssl.h>
@@ -28,6 +33,7 @@
 
 #include "http_header_map.h"
 #include "arena_allocator.h"
+#include "pool_allocator.h"
 #include "file_cache.h"
 #include "types.h"
 #include "string.h"
@@ -36,13 +42,16 @@
 #include "articles.h"
 #include "sqlite3.h"
 
-constexpr u8 N_THREADS = 1;
-constexpr u16 MAX_N_PENDING_CONNECTIONS = 128;
-constexpr u16 PORT = 8080;
+#define N_THREADS 1
+#define MAX_N_PENDING_CONNECTIONS 128
+#define PORT 8080
 
-constexpr usize MEMORY_LIMIT = 10 * 1024 * 1024;
-constexpr usize FILE_CACHE_LIMIT = 8 * 1024 * 1024;
-constexpr usize THREAD_LOCAL_MEMORY = (MEMORY_LIMIT - FILE_CACHE_LIMIT) / N_THREADS;
+#define MAX_EVENTS 16
+#define MAX_CONNS 16
+
+#define MEMORY_LIMIT 10 * 1024 * 1024
+#define FILE_CACHE_LIMIT 8 * 1024 * 1024
+#define THREAD_LOCAL_MEMORY (MEMORY_LIMIT - FILE_CACHE_LIMIT) / N_THREADS
 
 #ifndef PRIVATE_KEY_PATH
 #define PRIVATE_KEY_PATH "key.pem"
@@ -70,6 +79,7 @@ constexpr usize THREAD_LOCAL_MEMORY = (MEMORY_LIMIT - FILE_CACHE_LIMIT) / N_THRE
 // 		- create a character encoding table
 #define AT_ENCODING "%40"
 #define MIN_EMAIL_LEN 2 + sizeof(AT_ENCODING) - 1
+#define EXPIRATION_TIME 2
 
 CONST_MEMEQL(memEqlEmailPrefix, EMAIL_PREFIX);
 
@@ -86,7 +96,6 @@ typedef SSL* write_handle;
 typedef i32 write_handle;
 #endif
 
-// FILE* logStream = stderr;
 #define log(msg, ...) fprintf(stderr, msg __VA_OPT__(,) __VA_ARGS__)
 
 u8 putPasswdHash[SHA256_DIGEST_LENGTH];
@@ -156,9 +165,7 @@ void handleGetRequest(http_response* result, http_request* request,
 					  file_cache* fileCache, arena_allocator* alloc)
 {
 	file_bucket file;
-	
 	string requestTarget = request->requestTarget;
-
 	if (*requestTarget.ptr == '/')
 	{
 		++requestTarget.ptr;
@@ -170,7 +177,6 @@ void handleGetRequest(http_response* result, http_request* request,
 		initEmptyResponse(result, NOT_FOUND);
 		return;
 	}
-
 	// TODO(louis): Should we acquire the mutex every time? Writes to the file cache are very rare.
 	if (get(&file, fileCache, &requestTarget) <= 0)
 	{
@@ -401,13 +407,55 @@ void handlePutRequest(http_response* result, http_request* request,
 		initEmptyResponse(result, BAD_REQUEST);
 }
 
+struct client_conn
+{
+	i32 cfd;
+	i32 tfd;
+};
+
+union event_data
+{
+	i32 listenSocket;
+	client_conn clientConn;
+};
+
+enum event_kind 
+{
+	ACCEPT,
+	READ, 
+	TIMER
+};
+
+struct conn_event 
+{
+	event_data data;
+	event_kind kind;
+};
+
+#if TLS
+void closeConnection(SSL* ssl, i32 fd)
+{
+	if (ssl)
+	{
+		SSL_shutdown(ssl);
+		SSL_free(ssl);
+	}
+
+	close(fd);
+}
+#else 
+#define closeConnection(a, b) close(b)
+#endif
+
+
 struct handle_request_args 
 {
 	file_cache* fileCache;
-	arena_allocator* requestLocalMemory;
+	arena_allocator* threadLocalMemory;
 	i32 socketDescriptor;
 	articles_resource* resource;
 	sqlite3* db;
+	i32 clockId;
 #if TLS
 	SSL_CTX* ctx;
 #endif
@@ -417,10 +465,12 @@ void* handleRequests(void* args)
 {
 	handle_request_args* handleRequestArgs = (handle_request_args*) args;
 	file_cache* fileCache = handleRequestArgs->fileCache;
-	arena_allocator* requestLocalMemory = handleRequestArgs->requestLocalMemory;
-	i32 socketDescriptor = handleRequestArgs->socketDescriptor;
+	arena_allocator* threadLocalMemory = handleRequestArgs->threadLocalMemory;
+	i32 serverSocket = handleRequestArgs->socketDescriptor;
 	articles_resource* resource = handleRequestArgs->resource;
 	sqlite3* db = handleRequestArgs->db;
+	i32 clockId = handleRequestArgs->clockId;
+
 
 #if TLS
 	SSL_CTX* ctx = handleRequestArgs->ctx;
@@ -440,171 +490,244 @@ void* handleRequests(void* args)
 	init(&request.headerMap);
 	init(&response.headerMap);
 
+	void* poolStart = allocate(threadLocalMemory, sizeof(conn_event) * 2 * MAX_CONNS);
+	pool_allocator connEventPool;
+	init(&connEventPool, poolStart, 
+	  	 sizeof(conn_event) * 2 * MAX_CONNS, 
+	  	 sizeof(conn_event));
+
+	arena_allocator requestLocalMemory;
+	consume(&requestLocalMemory, threadLocalMemory);
+
+	i32 epollfd = epoll_create1(0);
+	if (epollfd == -1)
+		assert(!"Cannot create epoll.");
+
+	struct epoll_event ev, events[MAX_EVENTS];
+	conn_event* acceptEv, *readEvent, *timerEvent, *event;
+	acceptEv = (conn_event*) allocate(&connEventPool);
+	assert(acceptEv != (conn_event*) -1 && "Unable to allocate first conn_event.");
+	acceptEv->data.listenSocket = serverSocket;
+	acceptEv->kind = ACCEPT;
+	ev.events = EPOLLIN;
+	ev.data.ptr = (void*) acceptEv;
+	if (epoll_ctl(epollfd, EPOLL_CTL_ADD, serverSocket, &ev) == -1)
+		assert(!"Cannot add server socket to epoll");
+
+	i32 nfds, cfd, tfd, fd, readBytes;
+	char requestBuffer[MAX_HTTP_MESSAGE_LEN];
+	buffered_response_writer writer;
+	init(&writer);
+	struct timespec period = { 0 };
+	struct timespec value = { EXPIRATION_TIME, 0 };
+	struct itimerspec timerValue = { period, value };
+
 	for (;;)
 	{
-		// TODO(louis): spawn multiple threads that can accept and handle connections.
-		i32 readBytes;
-		struct sockaddr_in clientSocketAddr;
-		socklen_t addrlen;
-		
-		i32 clientSocketDescriptor = accept(socketDescriptor, (struct sockaddr*) &clientSocketAddr, &addrlen);
-		if (clientSocketDescriptor == -1)
-			// TODO(louis): Implement some proper error handling (see man page).
-			continue;
-
-#if TLS
-		ssl = SSL_new(ctx);
-
-		if (!ssl)
-	  	{
-			fprintf(stderr, "Cannot acquire ssl object.\n");
-			goto close_client_socket;
-		}
-
-		if (!SSL_set_fd(ssl, clientSocketDescriptor))
-	  	{
-			fprintf(stderr, "Cannot set fd for ssl object.\n");
-			goto close_client_socket;
-		}
-
-		if (SSL_accept(ssl) <= 0)
-	  	{
-			// TODO(louis): check for the individual return values.
-			fprintf(stderr, "Cannot establish ssl connection.\n");
-			goto close_client_socket;
-		}
-#endif
-
-		char requestBuffer[MAX_HTTP_MESSAGE_LEN];
-
-		buffered_response_writer writer;
-		init(&writer);
-#if TLS
-		readBytes = sockRead(ssl, requestBuffer, MAX_HTTP_HEADER_LEN);	
-#else
-		readBytes = sockRead(clientSocketDescriptor, requestBuffer, MAX_HTTP_HEADER_LEN);	
-#endif
-
-		if (readBytes <= 0)
-			goto close_client_socket;
-
-		u16 errorCode;
-		if (parseHttpRequest(&errorCode, &request, requestBuffer, readBytes) == CORRUPTED_HEADER)
+		i32 nfds = epoll_wait(epollfd, events, MAX_EVENTS, -1);
+		for (int i = 0; i < nfds; ++i)
 		{
-			// TODO(louis): replace this with the actual error code, and maybe make this more performant
-			pushStr(&writer, (char*) lookupStatusLine(BAD_REQUEST));
-			pushStr(&writer, (char*) CRLF);
-			pushStr(&writer, (char*) CRLF);
-#if TLS
-			sockWrite(ssl, (void*) writer.buffer, writer.offset);
-#else
-			sockWrite(clientSocketDescriptor, (void*) writer.buffer, writer.offset);
-#endif
-			goto close_client_socket;
-		}
-
-		string hostHeaderField;
-		if (!getHash(&hostHeaderField, &request.headerMap, 
-					 HOST_HEADER_HASH, (string*) &HOST_HEADER_NAME))
-		{
-			pushStr(&writer, (char*) lookupStatusLine(BAD_REQUEST));
-			pushStr(&writer, (char*) CRLF);
-			pushStr(&writer, (char*) CRLF);
-#if TLS
-			sockWrite(ssl, (void*) writer.buffer, writer.offset);
-#else
-			sockWrite(clientSocketDescriptor, (void*) writer.buffer, writer.offset);
-#endif
-			goto close_client_socket;
-		}
-
-		if (readBytes == MAX_HTTP_HEADER_LEN)
-		{
-#if TLS
-			i32 n = sockRead(ssl, requestBuffer + MAX_HTTP_HEADER_LEN, 
-						 MAX_HTTP_MESSAGE_LEN - MAX_HTTP_HEADER_LEN);
-#else
-			i32 n = sockRead(clientSocketDescriptor, requestBuffer + MAX_HTTP_HEADER_LEN, 
-						 MAX_HTTP_MESSAGE_LEN - MAX_HTTP_HEADER_LEN);
-#endif
-			
-			if (n > 0)
+			event = (conn_event*) events[i].data.ptr;
+			switch (event->kind)
 			{
-				if (request.messageBody.ptr)
-					request.messageBody.len += n;
-				else
+				case ACCEPT:
 				{
-	  				request.messageBody = 
+					readEvent = (conn_event*) allocate(&connEventPool);
+					timerEvent = (conn_event*) allocate(&connEventPool);
+					if (readEvent == (conn_event*) -1 || timerEvent == (conn_event*) -1)
 					{
-						requestBuffer + MAX_HTTP_HEADER_LEN,
-						n
-					};
+						log("No more connections left.");
+						break;
+					}
+
+					fd = event->data.listenSocket;
+					socklen_t addrlen;
+					struct sockaddr_in clientSocketAddr;
+					cfd = accept(fd, (struct sockaddr*) &clientSocketAddr, &addrlen);
+					assert(cfd != -1 && "Received invalid client socket descriptor.");
+
+					tfd = timerfd_create(CLOCK_REALTIME, 0);
+					// TODO(louis): should we crash here... probably not
+					assert(tfd != -1 && "Unable to create a timer.");
+					readEvent->data.clientConn = { cfd, tfd };
+					readEvent->kind = READ;
+					ev.data.ptr = (void*) readEvent;	
+					ev.events = EPOLLIN;
+					assert(epoll_ctl(epollfd, EPOLL_CTL_ADD, cfd, &ev) != -1 && "Cannot add client socket to epoll.");
+
+					// TODO(louis): Maybe create the timers ahead of time and restrict the amount of concurrent connections.
+					timerEvent->data.clientConn = { cfd, tfd };
+					timerEvent->kind = TIMER;
+					ev.data.ptr = (void*) timerEvent;	
+					ev.events = EPOLLIN;
+					assert(epoll_ctl(epollfd, EPOLL_CTL_ADD, tfd, &ev) != -1 && "Cannot add client socket to epoll.");
+					// TODO(louis): Should we crash the server when we can't create a timer?
+					assert(timerfd_settime(tfd, 0, &timerValue, NULL) != -1 && "Cannot arm timer for connection.");
+					break;
 				}
-			}
-		}
-
-		switch (request.method)
-		{
-			case GET:
-			{
-				handleGetRequest(&response, &request, fileCache, requestLocalMemory);
-#if TLS
-				if (writeResponse(ssl, &response, &writer) == -1)
-#else
-				if (writeResponse(clientSocketDescriptor, &response, &writer) == -1)
-#endif
-					goto close_client_socket;
-
-				break;
-			}
-			case POST:
-			{
-				i32 rc = handlePostRequest(&response, &request, requestLocalMemory, db, stmt);
-				if (rc != SQLITE_OK)
+				case READ:
 				{
-					// TODO(louis):
-					assert(!"The database is broken, handle it properly...");
+					cfd = event->data.clientConn.cfd;
+					tfd = event->data.clientConn.tfd;
+#if TLS
+					ssl = SSL_new(ctx);
+					if (!ssl)
+					{
+						log("Cannot acquire ssl object.\n");
+						close(cfd);
+						goto request_cleanup;
+					}
+
+					if (!SSL_set_fd(ssl, cfd))
+					{
+						log("Cannot set fd for ssl object.\n");
+						closeConnection(ssl, cfd);
+						goto request_cleanup;
+					}
+
+					if (SSL_accept(ssl) <= 0)
+					{
+						// TODO(louis): check for the individual return values.
+						log("Cannot establish ssl connection.\n");
+						closeConnection(ssl, cfd);
+						goto request_cleanup;
+					}
+#endif
+#if TLS
+					readBytes = sockRead(ssl, requestBuffer, MAX_HTTP_HEADER_LEN);	
+#else
+					readBytes = sockRead(cfd, requestBuffer, MAX_HTTP_HEADER_LEN);	
+#endif
+
+					if (readBytes <= 0)
+					{
+						closeConnection(ssl, cfd);
+						goto request_cleanup;
+					}
+
+					u16 errorCode;
+					if (parseHttpRequest(&errorCode, &request, requestBuffer, readBytes) == CORRUPTED_HEADER)
+					{
+						// TODO(louis): replace this with the actual error code, and maybe make this more performant
+						pushStr(&writer, (char*) lookupStatusLine(BAD_REQUEST));
+						pushStr(&writer, (char*) CRLF);
+						pushStr(&writer, (char*) CRLF);
+#if TLS
+						sockWrite(ssl, (void*) writer.buffer, writer.offset);
+#else
+						sockWrite(cfd, (void*) writer.buffer, writer.offset);
+#endif
+						// TODO(louis): Maybe reset the timer here.	
+						goto request_cleanup;
+					}
+
+					string hostHeaderField;
+					if (!getHash(&hostHeaderField, &request.headerMap, 
+				  				 HOST_HEADER_HASH, (string*) &HOST_HEADER_NAME))
+					{
+						pushStr(&writer, (char*) lookupStatusLine(BAD_REQUEST));
+						pushStr(&writer, (char*) CRLF);
+						pushStr(&writer, (char*) CRLF);
+#if TLS
+						sockWrite(ssl, (void*) writer.buffer, writer.offset);
+#else
+						sockWrite(cfd, (void*) writer.buffer, writer.offset);
+#endif
+						goto request_cleanup;
+					}
+
+					if (readBytes == MAX_HTTP_HEADER_LEN)
+					{
+#if TLS
+						i32 n = sockRead(ssl, requestBuffer + MAX_HTTP_HEADER_LEN, 
+					   MAX_HTTP_MESSAGE_LEN - MAX_HTTP_HEADER_LEN);
+#else
+						i32 n = sockRead(cfd, requestBuffer + MAX_HTTP_HEADER_LEN, 
+					   MAX_HTTP_MESSAGE_LEN - MAX_HTTP_HEADER_LEN);
+#endif
+						if (n > 0)
+						{
+							if (request.messageBody.ptr)
+								request.messageBody.len += n;
+							else
+							{
+								request.messageBody = 
+									{
+									requestBuffer + MAX_HTTP_HEADER_LEN,
+									n
+								};
+							}
+						}
+					}
+
+					assert(timerfd_settime(tfd, 0, &timerValue, NULL) != -1 && "Cannot arm timer for connection.");
+					switch (request.method)
+					{
+						case GET:
+						{
+							handleGetRequest(&response, &request, fileCache, &requestLocalMemory);
+#if TLS
+							if (writeResponse(ssl, &response, &writer) == -1)
+#else
+							if (writeResponse(cfd, &response, &writer) == -1)
+#endif
+							{
+								closeConnection(ssl, cfd);
+								goto request_cleanup;
+							}
+							break;
+						}
+						case POST:
+						{
+							i32 rc = handlePostRequest(&response, &request, &requestLocalMemory, db, stmt);
+							if (rc != SQLITE_OK)
+								// TODO(louis):
+								assert(!"The database is broken, handle it properly...");
+
+#if TLS
+							if (writeResponse(ssl, &response, &writer) == -1)
+#else
+							if (writeResponse(cfd, &response, &writer) == -1)
+#endif
+	   						{
+								closeConnection(ssl, cfd);
+								goto request_cleanup;
+							}
+							break;
+						}
+						case PUT:
+						{
+							handlePutRequest(&response, &request, &requestLocalMemory, resource);
+#if TLS
+							if (writeResponse(ssl, &response, &writer) == -1)
+#else
+							if (writeResponse(cfd, &response, &writer) == -1)
+#endif
+							{
+								closeConnection(ssl, cfd);
+								goto request_cleanup;
+							}
+							break;
+						}
+					}
+
+				request_cleanup:
+					reset(&writer);
+					reset(&requestLocalMemory);
+					clear(&request.headerMap);
+					clear(&response.headerMap);
+					break;
 				}
-
-#if TLS
-				if (writeResponse(ssl, &response, &writer) == -1)
-#else
-				if (writeResponse(clientSocketDescriptor, &response, &writer) == -1)
-#endif
-					goto close_client_socket;
-
-				break;
-			}
-			case PUT:
-			{
-				handlePutRequest(&response, &request, requestLocalMemory, resource);
-#if TLS
-				if (writeResponse(ssl, &response, &writer) == -1)
-#else
-				if (writeResponse(clientSocketDescriptor, &response, &writer) == -1)
-#endif
-					goto close_client_socket;
-
-				break;
+				case TIMER:
+				{
+					client_conn clientConn = event->data.clientConn;
+					close(clientConn.cfd);
+					close(clientConn.tfd);
+					free(&connEventPool, (void*) event);
+					break;
+				}
 			}
 		}
-
-	close_client_socket:
-#if TLS
-	  	if (ssl)
-	  	{
-			SSL_shutdown(ssl);
-			SSL_free(ssl);
-		}
-#endif
-
-		reset(&writer);
-		reset(requestLocalMemory);
-		clear(&request.headerMap);
-		clear(&response.headerMap);
-
-		if (clientSocketDescriptor >= 0) 
-			close(clientSocketDescriptor);
 	}
 }
 
@@ -687,6 +810,10 @@ i16 serve(u16 port)
 	}
 
 	{
+		i32 clockId;
+		if (clock_getcpuclockid(getpid(), &clockId) != 0)
+			assert(!"Unable to get clock id for the process");
+
 		file_cache fileCache;
 		if (init(&fileCache, &fileCacheMemory) == -1)
 		{
@@ -706,12 +833,12 @@ i16 serve(u16 port)
 		init(&resource);
 
 		pthread_t threadHandles[N_THREADS];
-		arena_allocator requestLocalMemory[N_THREADS];
+		arena_allocator threadLocalMemory[N_THREADS];
 		handle_request_args workerArgs[N_THREADS];
 		sqlite3* dbConns[N_THREADS];
 
 		pthread_t* currentThreadHandle = threadHandles;
-		arena_allocator* currentAlloc = requestLocalMemory;
+		arena_allocator* currentAlloc = threadLocalMemory;
 		handle_request_args* currentArg = workerArgs;
 		sqlite3** currentDb = dbConns;
 
@@ -732,9 +859,10 @@ i16 serve(u16 port)
 
 			currentArg->fileCache = &fileCache;
 			currentArg->socketDescriptor = socketDescriptor;
-			currentArg->requestLocalMemory = currentAlloc;
+			currentArg->threadLocalMemory = currentAlloc;
 			currentArg->resource = &resource;
 			currentArg->db = *currentDb;
+			currentArg->clockId = clockId;
 #if TLS
 			currentArg->ctx = ctx;
 #endif
