@@ -12,6 +12,8 @@
 // 	- pool allocator for file cache
 // 	- implement conncection: close header for bad request things, and also handle connection close messages
 // 	- insert actual @ rather that %40 into database 
+// 	- does the epoll store the fire of the timer when it first fires then resets because of another read because by then 
+// 	  the timer should not have fired in the first place (or at least the first fire should be removed)
 
 #include <sys/socket.h>
 #include <sys/epoll.h>
@@ -411,6 +413,9 @@ struct client_conn
 {
 	i32 cfd;
 	i32 tfd;
+#if TLS
+	SSL* ssl;
+#endif
 };
 
 union event_data
@@ -432,21 +437,19 @@ struct conn_event
 	event_kind kind;
 };
 
-#if TLS
-void closeConnection(SSL* ssl, i32 fd)
+void closeConnection(client_conn conn)
 {
-	if (ssl)
+#if TLS
+	if (conn.ssl)
 	{
-		SSL_shutdown(ssl);
-		SSL_free(ssl);
+		SSL_shutdown(conn.ssl);
+		SSL_free(conn.ssl);
 	}
-
-	close(fd);
-}
-#else 
-#define closeConnection(a, b) close(b)
 #endif
 
+	close(conn.cfd);
+	close(conn.tfd);
+}
 
 struct handle_request_args 
 {
@@ -505,6 +508,7 @@ void* handleRequests(void* args)
 
 	struct epoll_event ev, events[MAX_EVENTS];
 	conn_event* acceptEv, *readEvent, *timerEvent, *event;
+	client_conn clientConn;
 	acceptEv = (conn_event*) allocate(&connEventPool);
 	assert(acceptEv != (conn_event*) -1 && "Unable to allocate first conn_event.");
 	acceptEv->data.listenSocket = serverSocket;
@@ -549,14 +553,14 @@ void* handleRequests(void* args)
 					tfd = timerfd_create(CLOCK_REALTIME, 0);
 					// TODO(louis): should we crash here... probably not
 					assert(tfd != -1 && "Unable to create a timer.");
-					readEvent->data.clientConn = { cfd, tfd };
+					readEvent->data.clientConn = { cfd, tfd, NULL };
 					readEvent->kind = READ;
 					ev.data.ptr = (void*) readEvent;	
 					ev.events = EPOLLIN;
 					assert(epoll_ctl(epollfd, EPOLL_CTL_ADD, cfd, &ev) != -1 && "Cannot add client socket to epoll.");
 
 					// TODO(louis): Maybe create the timers ahead of time and restrict the amount of concurrent connections.
-					timerEvent->data.clientConn = { cfd, tfd };
+					timerEvent->data.clientConn = { cfd, tfd, NULL };
 					timerEvent->kind = TIMER;
 					ev.data.ptr = (void*) timerEvent;	
 					ev.events = EPOLLIN;
@@ -567,33 +571,38 @@ void* handleRequests(void* args)
 				}
 				case READ:
 				{
-					cfd = event->data.clientConn.cfd;
-					tfd = event->data.clientConn.tfd;
+					
+					clientConn = event->data.clientConn;
+					cfd = clientConn.cfd;
+					tfd = clientConn.tfd;
+					ssl = clientConn.ssl;
 #if TLS
-					ssl = SSL_new(ctx);
 					if (!ssl)
 					{
-						log("Cannot acquire ssl object.\n");
-						close(cfd);
-						goto request_cleanup;
+						ssl = SSL_new(ctx);
+						if (!ssl)
+						{
+							log("Cannot acquire ssl object.\n");
+							closeConnection(clientConn);
+							goto request_cleanup;
+						}
+
+						if (!SSL_set_fd(ssl, cfd))
+						{
+							log("Cannot set fd for ssl object.\n");
+							closeConnection(clientConn);
+							goto request_cleanup;
+						}
+
+						if (SSL_accept(ssl) <= 0)
+						{
+							// TODO(louis): check for the individual return values.
+							log("Cannot establish ssl connection.\n");
+							closeConnection(clientConn);
+							goto request_cleanup;
+						}
 					}
 
-					if (!SSL_set_fd(ssl, cfd))
-					{
-						log("Cannot set fd for ssl object.\n");
-						closeConnection(ssl, cfd);
-						goto request_cleanup;
-					}
-
-					if (SSL_accept(ssl) <= 0)
-					{
-						// TODO(louis): check for the individual return values.
-						log("Cannot establish ssl connection.\n");
-						closeConnection(ssl, cfd);
-						goto request_cleanup;
-					}
-#endif
-#if TLS
 					readBytes = sockRead(ssl, requestBuffer, MAX_HTTP_HEADER_LEN);	
 #else
 					readBytes = sockRead(cfd, requestBuffer, MAX_HTTP_HEADER_LEN);	
@@ -601,7 +610,7 @@ void* handleRequests(void* args)
 
 					if (readBytes <= 0)
 					{
-						closeConnection(ssl, cfd);
+						closeConnection(clientConn);
 						goto request_cleanup;
 					}
 
@@ -672,7 +681,7 @@ void* handleRequests(void* args)
 							if (writeResponse(cfd, &response, &writer) == -1)
 #endif
 							{
-								closeConnection(ssl, cfd);
+								closeConnection(clientConn);
 								goto request_cleanup;
 							}
 							break;
@@ -690,7 +699,7 @@ void* handleRequests(void* args)
 							if (writeResponse(cfd, &response, &writer) == -1)
 #endif
 	   						{
-								closeConnection(ssl, cfd);
+								closeConnection(clientConn);
 								goto request_cleanup;
 							}
 							break;
@@ -704,7 +713,7 @@ void* handleRequests(void* args)
 							if (writeResponse(cfd, &response, &writer) == -1)
 #endif
 							{
-								closeConnection(ssl, cfd);
+								closeConnection(clientConn);
 								goto request_cleanup;
 							}
 							break;
