@@ -7,9 +7,11 @@
 #include "types.h"
 #include "mem.h"
 #include "hash.h"
-#include "arena_allocator.h"
+#include "pool_allocator.h"
 
 constexpr char STATIC_FILE_DIR[] = "/var/www/static/";
+#define MAX_FILE_SIZE 8 * 1024
+
 
 
 // TODO(louis): what about cache eviction?
@@ -45,10 +47,10 @@ struct file_cache
 	u32 len;
 
 	file_bucket buckets[HASH_TABLE_M];
-	arena_allocator* alloc;
+	pool_allocator* alloc;
 };
 
-i16 init(file_cache*, arena_allocator*);
+i16 init(file_cache*, pool_allocator*);
 i16 destroy(file_cache*);
 i16 get(file_bucket*, file_cache*, string*);
 i16 insert(file_cache*, char*, usize, char*, usize);

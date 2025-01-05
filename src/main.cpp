@@ -52,8 +52,8 @@
 #define MAX_CONNS 16
 
 #define MEMORY_LIMIT 10 * 1024 * 1024
-#define FILE_CACHE_LIMIT 8 * 1024 * 1024
-#define THREAD_LOCAL_MEMORY (MEMORY_LIMIT - FILE_CACHE_LIMIT) / N_THREADS
+#define FILE_CACHE_SIZE 8 * 1024 * 1024
+#define THREAD_LOCAL_MEMORY (MEMORY_LIMIT - FILE_CACHE_SIZE) / N_THREADS
 
 #ifndef PRIVATE_KEY_PATH
 #define PRIVATE_KEY_PATH "key.pem"
@@ -553,14 +553,24 @@ void* handleRequests(void* args)
 					tfd = timerfd_create(CLOCK_REALTIME, 0);
 					// TODO(louis): should we crash here... probably not
 					assert(tfd != -1 && "Unable to create a timer.");
-					readEvent->data.clientConn = { cfd, tfd, NULL };
+					readEvent->data.clientConn =
+					{ cfd, tfd,
+#if TLS 
+					  NULL
+#endif
+					};
 					readEvent->kind = READ;
 					ev.data.ptr = (void*) readEvent;	
 					ev.events = EPOLLIN;
 					assert(epoll_ctl(epollfd, EPOLL_CTL_ADD, cfd, &ev) != -1 && "Cannot add client socket to epoll.");
 
 					// TODO(louis): Maybe create the timers ahead of time and restrict the amount of concurrent connections.
-					timerEvent->data.clientConn = { cfd, tfd, NULL };
+					timerEvent->data.clientConn =
+					{ cfd, tfd,
+#if TLS 
+					  NULL
+#endif
+					};
 					timerEvent->kind = TIMER;
 					ev.data.ptr = (void*) timerEvent;	
 					ev.events = EPOLLIN;
@@ -575,8 +585,8 @@ void* handleRequests(void* args)
 					clientConn = event->data.clientConn;
 					cfd = clientConn.cfd;
 					tfd = clientConn.tfd;
-					ssl = clientConn.ssl;
 #if TLS
+					ssl = clientConn.ssl;
 					if (!ssl)
 					{
 						ssl = SSL_new(ctx);
@@ -648,11 +658,11 @@ void* handleRequests(void* args)
 					if (readBytes == MAX_HTTP_HEADER_LEN)
 					{
 #if TLS
-						i32 n = sockRead(ssl, requestBuffer + MAX_HTTP_HEADER_LEN, 
-					   MAX_HTTP_MESSAGE_LEN - MAX_HTTP_HEADER_LEN);
+						i32 n = sockRead(ssl, requestBuffer + MAX_HTTP_HEADER_LEN,
+					   				 	 MAX_HTTP_MESSAGE_LEN - MAX_HTTP_HEADER_LEN);
 #else
-						i32 n = sockRead(cfd, requestBuffer + MAX_HTTP_HEADER_LEN, 
-					   MAX_HTTP_MESSAGE_LEN - MAX_HTTP_HEADER_LEN);
+						i32 n = sockRead(cfd, requestBuffer + MAX_HTTP_HEADER_LEN,
+					   					 MAX_HTTP_MESSAGE_LEN - MAX_HTTP_HEADER_LEN);
 #endif
 						if (n > 0)
 						{
@@ -660,8 +670,8 @@ void* handleRequests(void* args)
 								request.messageBody.len += n;
 							else
 							{
-								request.messageBody = 
-									{
+								request.messageBody =
+								{
 									requestBuffer + MAX_HTTP_HEADER_LEN,
 									n
 								};
@@ -730,8 +740,7 @@ void* handleRequests(void* args)
 				case TIMER:
 				{
 					client_conn clientConn = event->data.clientConn;
-					close(clientConn.cfd);
-					close(clientConn.tfd);
+					closeConnection(clientConn);
 					free(&connEventPool, (void*) event);
 					break;
 				}
@@ -773,10 +782,10 @@ i16 serve(u16 port)
 	if (init(&programMemory, MEMORY_LIMIT) == -1)
 		assert(!"Cannot acquire memory.\n");
 
-	arena_allocator fileCacheMemory;
-	if (subarena(&fileCacheMemory, &programMemory, FILE_CACHE_LIMIT) == -1)
-		assert(!"Cannot instantiate subarena.\n");
-
+	pool_allocator fileCacheMemory;
+	void* startAddr = allocate(&programMemory, FILE_CACHE_SIZE);
+	assert(startAddr != (void*) -1 && "File cache doesn't fit into the memory.");
+	init(&fileCacheMemory, startAddr, FILE_CACHE_SIZE, MAX_FILE_SIZE);
 	i32 socketDescriptor = socket(AF_INET, SOCK_STREAM, 0);
 	if (socketDescriptor == -1)
 	{
@@ -786,9 +795,7 @@ i16 serve(u16 port)
 
 	i32 optval = 1;
 	struct sockaddr_in socketAddr;
-	if (!inet_pton(AF_INET, "0.0.0.0", &socketAddr.sin_addr))
-		assert(!"Invalid ip address.\n");
-
+	assert(inet_pton(AF_INET, "0.0.0.0", &socketAddr.sin_addr) && "Invalid ip address.");
 	socketAddr.sin_family = AF_INET;
 	socketAddr.sin_port = htons(port);
 

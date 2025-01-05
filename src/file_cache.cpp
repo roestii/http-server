@@ -59,7 +59,7 @@ close_fd:
 	return retval;
 } */
 
-i32 loadFile(char** content, char* filePath, arena_allocator* alloc)
+i32 loadFile(char** content, char* filePath, pool_allocator* alloc)
 {
 	i16 retval = 0;
 	char pathBuf[sizeof(STATIC_FILE_DIR) + FILE_PATH_LEN - 1];
@@ -77,7 +77,8 @@ i32 loadFile(char** content, char* filePath, arena_allocator* alloc)
 		goto close_fd;
 	}
 	
-	*content = (char*) allocate(alloc, sizeof(char) * fileStat.st_size);
+	assert(fileStat.st_size <= alloc->chunkSize && "File is too large to fit into chunk.");
+	*content = (char*) allocate(alloc);
 	if (*content == (char*) -1)
 		assert(!"File does not fit into the cache");
 
@@ -96,7 +97,7 @@ close_fd:
 	return retval;
 }
 
-i16 init(file_cache* fileCache, arena_allocator* alloc)
+i16 init(file_cache* fileCache, pool_allocator* alloc)
 {
 	if (pthread_mutex_init(&fileCache->guard, NULL) == -1)
 		return -1;

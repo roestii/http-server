@@ -15,12 +15,13 @@ CONST_MEMEQL(memEqlHttpVersionPrefix, "HTTP/");
 CONST_FINDMEM(memFindCrlf, "\r\n");
 CONST_FINDMEM(memFind2Crlf, "\r\n\r\n");
 
-
 void initEmptyResponse(http_response* result, http_status_code statusCode)
 {
 	result->statusCode = statusCode;
 	result->reason = NULL;
 	result->messageBody = {0};
+	assert(insert(&result->headerMap, (string*) &CONTENT_LENGTH_HEADER_NAME, (string*) &ZERO_LEN) == 0 
+		   && "Cannot insert into empty header map");
 }
 
 const char* lookupStatusLine(http_status_code statusCode)
