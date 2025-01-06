@@ -1,4 +1,5 @@
 // TODO(louis):
+//  - somehow we messed up the freeing of the connections, nice
 // 	- introduce proper error handling using the rfc
 // 	- fix the server closing (this may be fixed)
 // 	- implement some transfer encoding, for the response maybe... (but this might not actually be worth it)
@@ -14,6 +15,9 @@
 // 	- insert actual @ rather that %40 into database 
 // 	- does the epoll store the fire of the timer when it first fires then resets because of another read because by then 
 // 	  the timer should not have fired in the first place (or at least the first fire should be removed)
+// 	- add hot reload...
+// 	- fix reloading eight times
+// 	- non blocking sockets, and we have to keep state for persistent connections 
 
 #include <sys/socket.h>
 #include <sys/epoll.h>
@@ -49,7 +53,6 @@
 #define PORT 8080
 
 #define MAX_EVENTS 16
-#define MAX_CONNS 16
 
 #define MEMORY_LIMIT 10 * 1024 * 1024
 #define FILE_CACHE_SIZE 8 * 1024 * 1024
@@ -91,11 +94,11 @@ pthread_cond_t killSignal;
 #if TLS
 #define sockRead(a, b, c) SSL_read(a, b, c)
 #define sockWrite(a, b, c) SSL_write(a, b, c)
-typedef SSL* write_handle; 
+typedef SSL* sock_handle; 
 #else
 #define sockRead(a, b, c) read(a, b, c)
 #define sockWrite(a, b, c) write(a, b, c)
-typedef i32 write_handle;
+typedef i32 sock_handle;
 #endif
 
 #define log(msg, ...) fprintf(stderr, msg __VA_OPT__(,) __VA_ARGS__)
@@ -115,7 +118,7 @@ void signalHandler(i32 signalId)
 	}
 }
 
-i16 writeResponse(write_handle wh, http_response* response, buffered_response_writer* writer)
+i16 writeResponse(sock_handle wh, http_response* response, buffered_response_writer* writer)
 {
 	char* statusLine = (char*) lookupStatusLine(response->statusCode);
 	if (pushStr(writer, statusLine) == -1)
@@ -412,43 +415,23 @@ void handlePutRequest(http_response* result, http_request* request,
 struct client_conn
 {
 	i32 cfd;
-	i32 tfd;
 #if TLS
 	SSL* ssl;
 #endif
 };
 
-union event_data
-{
-	i32 listenSocket;
-	client_conn clientConn;
-};
 
-enum event_kind 
-{
-	ACCEPT,
-	READ, 
-	TIMER
-};
-
-struct conn_event 
-{
-	event_data data;
-	event_kind kind;
-};
-
-void closeConnection(client_conn conn)
+void closeConnection(sock_handle sh)
 {
 #if TLS
-	if (conn.ssl)
-	{
-		SSL_shutdown(conn.ssl);
-		SSL_free(conn.ssl);
-	}
+	i32 fd = SSL_get_fd(sh);
+	assert(fd != -1 && "Something went horribly wrong.");
+	SSL_shutdown(sh);
+	SSL_free(sh);
+	close(fd);
+#else
+	close(sh);
 #endif
-
-	close(conn.cfd);
-	close(conn.tfd);
 }
 
 struct handle_request_args 
@@ -474,7 +457,6 @@ void* handleRequests(void* args)
 	sqlite3* db = handleRequestArgs->db;
 	i32 clockId = handleRequestArgs->clockId;
 
-
 #if TLS
 	SSL_CTX* ctx = handleRequestArgs->ctx;
 	SSL* ssl = NULL;
@@ -493,257 +475,163 @@ void* handleRequests(void* args)
 	init(&request.headerMap);
 	init(&response.headerMap);
 
-	void* poolStart = allocate(threadLocalMemory, sizeof(conn_event) * 2 * MAX_CONNS);
-	pool_allocator connEventPool;
-	init(&connEventPool, poolStart, 
-	  	 sizeof(conn_event) * 2 * MAX_CONNS, 
-	  	 sizeof(conn_event));
-
 	arena_allocator requestLocalMemory;
 	consume(&requestLocalMemory, threadLocalMemory);
 
 	i32 epollfd = epoll_create1(0);
-	if (epollfd == -1)
-		assert(!"Cannot create epoll.");
-
+	assert(epollfd != -1 && "Cannot create epoll");
 	struct epoll_event ev, events[MAX_EVENTS];
-	conn_event* acceptEv, *readEvent, *timerEvent, *event;
-	client_conn clientConn;
-	acceptEv = (conn_event*) allocate(&connEventPool);
-	assert(acceptEv != (conn_event*) -1 && "Unable to allocate first conn_event.");
-	acceptEv->data.listenSocket = serverSocket;
-	acceptEv->kind = ACCEPT;
 	ev.events = EPOLLIN;
-	ev.data.ptr = (void*) acceptEv;
-	if (epoll_ctl(epollfd, EPOLL_CTL_ADD, serverSocket, &ev) == -1)
-		assert(!"Cannot add server socket to epoll");
+	ev.data.fd = serverSocket;
+	assert(epoll_ctl(epollfd, EPOLL_CTL_ADD, serverSocket, &ev) == 0 && "Cannot add server socket to epoll");
 
+	sock_handle sockHandle;
 	i32 nfds, cfd, tfd, fd, readBytes;
 	char requestBuffer[MAX_HTTP_MESSAGE_LEN];
 	buffered_response_writer writer;
 	init(&writer);
-	struct timespec period = { 0 };
-	struct timespec value = { EXPIRATION_TIME, 0 };
-	struct itimerspec timerValue = { period, value };
 
 	for (;;)
 	{
 		i32 nfds = epoll_wait(epollfd, events, MAX_EVENTS, -1);
 		for (int i = 0; i < nfds; ++i)
 		{
-			event = (conn_event*) events[i].data.ptr;
-			switch (event->kind)
+			fd = events[i].data.fd;
+			if (fd == serverSocket)
 			{
-				case ACCEPT:
+				socklen_t addrlen;
+				struct sockaddr_in clientSocketAddr;
+				cfd = accept(fd, (struct sockaddr*) &clientSocketAddr, &addrlen);
+				assert(cfd != -1 && "Received invalid client socket descriptor.");
+#if TLS
+				ssl = SSL_new(ctx);
+				if (!ssl)
 				{
-					readEvent = (conn_event*) allocate(&connEventPool);
-					timerEvent = (conn_event*) allocate(&connEventPool);
-					if (readEvent == (conn_event*) -1 || timerEvent == (conn_event*) -1)
+					log("Cannot acquire ssl object.\n");
+					close(cfd);
+					goto request_cleanup;
+				}
+
+				if (!SSL_set_fd(ssl, cfd))
+				{
+					log("Cannot set fd for ssl object.\n");
+					close(cfd);
+				}
+
+				if (SSL_accept(ssl) <= 0)
+				{
+					// TODO(louis): check for the individual return values.
+					log("Cannot establish ssl connection.\n");
+					closeConnection(ssl);
+				}
+
+				ev.data.ptr = ssl;	
+#else
+				ev.data.fd = cfd;	
+#endif
+				ev.events = EPOLLIN;
+				assert(epoll_ctl(epollfd, EPOLL_CTL_ADD, cfd, &ev) != -1 && "Cannot add client socket to epoll.");
+			}
+			else
+			{
+#if TLS
+				sockHandle = (SSL*) events[i].data.ptr;
+#else
+				sockHandle = fd;
+#endif
+				readBytes = sockRead(sockHandle, requestBuffer, MAX_HTTP_HEADER_LEN);	
+
+				if (readBytes <= 0)
+				{
+					closeConnection(sockHandle);
+					goto request_cleanup;
+				}
+
+				u16 errorCode;
+				if (parseHttpRequest(&errorCode, &request, requestBuffer, readBytes) == CORRUPTED_HEADER)
+				{
+					// TODO(louis): replace this with the actual error code, and maybe make this more performant
+					initEmptyResponse(&response, BAD_REQUEST);
+					if (writeResponse(sockHandle, &response, &writer) == -1)
+						closeConnection(sockHandle);
+
+					goto request_cleanup;
+				}
+
+				string hostHeaderField;
+				if (!getHash(&hostHeaderField, &request.headerMap, 
+							 HOST_HEADER_HASH, (string*) &HOST_HEADER_NAME))
+				{
+					initEmptyResponse(&response, BAD_REQUEST);
+					if (writeResponse(sockHandle, &response, &writer) == -1)
+						closeConnection(sockHandle);
+					goto request_cleanup;
+				}
+
+				// TODO(louis): This is probably no good idea.
+				if (readBytes == MAX_HTTP_HEADER_LEN)
+				{
+					i32 n = sockRead(sockHandle, requestBuffer + MAX_HTTP_HEADER_LEN,
+									 MAX_HTTP_MESSAGE_LEN - MAX_HTTP_HEADER_LEN);
+					if (n > 0)
 					{
-						log("No more connections left.");
+						if (request.messageBody.ptr)
+							request.messageBody.len += n;
+						else
+						{
+							request.messageBody =
+							{
+								requestBuffer + MAX_HTTP_HEADER_LEN,
+								n
+							};
+						}
+					}
+				}
+
+				switch (request.method)
+				{
+					case GET:
+					{
+						handleGetRequest(&response, &request, fileCache, &requestLocalMemory);
+						if (writeResponse(sockHandle, &response, &writer) == -1)
+						{
+							closeConnection(sockHandle);
+							goto request_cleanup;
+						}
 						break;
 					}
-
-					fd = event->data.listenSocket;
-					socklen_t addrlen;
-					struct sockaddr_in clientSocketAddr;
-					cfd = accept(fd, (struct sockaddr*) &clientSocketAddr, &addrlen);
-					assert(cfd != -1 && "Received invalid client socket descriptor.");
-
-					tfd = timerfd_create(CLOCK_REALTIME, 0);
-					// TODO(louis): should we crash here... probably not
-					assert(tfd != -1 && "Unable to create a timer.");
-					readEvent->data.clientConn =
-					{ cfd, tfd,
-#if TLS 
-					  NULL
-#endif
-					};
-					readEvent->kind = READ;
-					ev.data.ptr = (void*) readEvent;	
-					ev.events = EPOLLIN;
-					assert(epoll_ctl(epollfd, EPOLL_CTL_ADD, cfd, &ev) != -1 && "Cannot add client socket to epoll.");
-
-					// TODO(louis): Maybe create the timers ahead of time and restrict the amount of concurrent connections.
-					timerEvent->data.clientConn =
-					{ cfd, tfd,
-#if TLS 
-					  NULL
-#endif
-					};
-					timerEvent->kind = TIMER;
-					ev.data.ptr = (void*) timerEvent;	
-					ev.events = EPOLLIN;
-					assert(epoll_ctl(epollfd, EPOLL_CTL_ADD, tfd, &ev) != -1 && "Cannot add client socket to epoll.");
-					// TODO(louis): Should we crash the server when we can't create a timer?
-					assert(timerfd_settime(tfd, 0, &timerValue, NULL) != -1 && "Cannot arm timer for connection.");
-					break;
-				}
-				case READ:
-				{
-					
-					clientConn = event->data.clientConn;
-					cfd = clientConn.cfd;
-					tfd = clientConn.tfd;
-#if TLS
-					ssl = clientConn.ssl;
-					if (!ssl)
+					case POST:
 					{
-						ssl = SSL_new(ctx);
-						if (!ssl)
+						i32 rc = handlePostRequest(&response, &request, &requestLocalMemory, db, stmt);
+						if (rc != SQLITE_OK)
+							// TODO(louis):
+							assert(!"The database is broken, handle it properly...");
+
+						if (writeResponse(sockHandle, &response, &writer) == -1)
 						{
-							log("Cannot acquire ssl object.\n");
-							closeConnection(clientConn);
+							closeConnection(sockHandle);
 							goto request_cleanup;
 						}
-
-						if (!SSL_set_fd(ssl, cfd))
+						break;
+					}
+					case PUT:
+					{
+						handlePutRequest(&response, &request, &requestLocalMemory, resource);
+						if (writeResponse(sockHandle, &response, &writer) == -1)
 						{
-							log("Cannot set fd for ssl object.\n");
-							closeConnection(clientConn);
+							closeConnection(sockHandle);
 							goto request_cleanup;
 						}
-
-						if (SSL_accept(ssl) <= 0)
-						{
-							// TODO(louis): check for the individual return values.
-							log("Cannot establish ssl connection.\n");
-							closeConnection(clientConn);
-							goto request_cleanup;
-						}
+						break;
 					}
-
-					readBytes = sockRead(ssl, requestBuffer, MAX_HTTP_HEADER_LEN);	
-#else
-					readBytes = sockRead(cfd, requestBuffer, MAX_HTTP_HEADER_LEN);	
-#endif
-
-					if (readBytes <= 0)
-					{
-						closeConnection(clientConn);
-						goto request_cleanup;
-					}
-
-					u16 errorCode;
-					if (parseHttpRequest(&errorCode, &request, requestBuffer, readBytes) == CORRUPTED_HEADER)
-					{
-						// TODO(louis): replace this with the actual error code, and maybe make this more performant
-						pushStr(&writer, (char*) lookupStatusLine(BAD_REQUEST));
-						pushStr(&writer, (char*) CRLF);
-						pushStr(&writer, (char*) CRLF);
-#if TLS
-						sockWrite(ssl, (void*) writer.buffer, writer.offset);
-#else
-						sockWrite(cfd, (void*) writer.buffer, writer.offset);
-#endif
-						// TODO(louis): Maybe reset the timer here.	
-						goto request_cleanup;
-					}
-
-					string hostHeaderField;
-					if (!getHash(&hostHeaderField, &request.headerMap, 
-				  				 HOST_HEADER_HASH, (string*) &HOST_HEADER_NAME))
-					{
-						pushStr(&writer, (char*) lookupStatusLine(BAD_REQUEST));
-						pushStr(&writer, (char*) CRLF);
-						pushStr(&writer, (char*) CRLF);
-#if TLS
-						sockWrite(ssl, (void*) writer.buffer, writer.offset);
-#else
-						sockWrite(cfd, (void*) writer.buffer, writer.offset);
-#endif
-						goto request_cleanup;
-					}
-
-					if (readBytes == MAX_HTTP_HEADER_LEN)
-					{
-#if TLS
-						i32 n = sockRead(ssl, requestBuffer + MAX_HTTP_HEADER_LEN,
-					   				 	 MAX_HTTP_MESSAGE_LEN - MAX_HTTP_HEADER_LEN);
-#else
-						i32 n = sockRead(cfd, requestBuffer + MAX_HTTP_HEADER_LEN,
-					   					 MAX_HTTP_MESSAGE_LEN - MAX_HTTP_HEADER_LEN);
-#endif
-						if (n > 0)
-						{
-							if (request.messageBody.ptr)
-								request.messageBody.len += n;
-							else
-							{
-								request.messageBody =
-								{
-									requestBuffer + MAX_HTTP_HEADER_LEN,
-									n
-								};
-							}
-						}
-					}
-
-					assert(timerfd_settime(tfd, 0, &timerValue, NULL) != -1 && "Cannot arm timer for connection.");
-					switch (request.method)
-					{
-						case GET:
-						{
-							handleGetRequest(&response, &request, fileCache, &requestLocalMemory);
-#if TLS
-							if (writeResponse(ssl, &response, &writer) == -1)
-#else
-							if (writeResponse(cfd, &response, &writer) == -1)
-#endif
-							{
-								closeConnection(clientConn);
-								goto request_cleanup;
-							}
-							break;
-						}
-						case POST:
-						{
-							i32 rc = handlePostRequest(&response, &request, &requestLocalMemory, db, stmt);
-							if (rc != SQLITE_OK)
-								// TODO(louis):
-								assert(!"The database is broken, handle it properly...");
-
-#if TLS
-							if (writeResponse(ssl, &response, &writer) == -1)
-#else
-							if (writeResponse(cfd, &response, &writer) == -1)
-#endif
-	   						{
-								closeConnection(clientConn);
-								goto request_cleanup;
-							}
-							break;
-						}
-						case PUT:
-						{
-							handlePutRequest(&response, &request, &requestLocalMemory, resource);
-#if TLS
-							if (writeResponse(ssl, &response, &writer) == -1)
-#else
-							if (writeResponse(cfd, &response, &writer) == -1)
-#endif
-							{
-								closeConnection(clientConn);
-								goto request_cleanup;
-							}
-							break;
-						}
-					}
-
-				request_cleanup:
-					reset(&writer);
-					reset(&requestLocalMemory);
-					clear(&request.headerMap);
-					clear(&response.headerMap);
-					break;
 				}
-				case TIMER:
-				{
-					client_conn clientConn = event->data.clientConn;
-					closeConnection(clientConn);
-					free(&connEventPool, (void*) event);
-					break;
-				}
+
+			request_cleanup:
+				reset(&writer);
+				reset(&requestLocalMemory);
+				clear(&request.headerMap);
+				clear(&response.headerMap);
+				break;
 			}
 		}
 	}
@@ -959,10 +847,6 @@ i32 main(i32 argc, char** argv)
 		return -1;
 	}
 
-	// log = fopen(LOG_PATH, "a");
-	// if (!log)
-	// 	return -1;
-
 	if (pthread_mutex_init(&killMutex, NULL) != 0)
 		return -1;
 	if (pthread_mutex_lock(&killMutex) != 0)
@@ -979,8 +863,6 @@ i32 main(i32 argc, char** argv)
 	i16 retval = 0;
 	if (serve(PORT) == -1)
 		retval = -1;
-
-	// fclose(log);
 
 	if (pthread_cond_destroy(&killSignal) != 0)
 		retval = -1;

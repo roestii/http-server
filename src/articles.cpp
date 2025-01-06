@@ -45,8 +45,8 @@ i16 parseArticlePreview(article_preview* result, char* buffer, usize len)
 	return 0;
 }
 
-i16 putArticle(articles_resource* resource, 
-			   char* fileName, usize fileNameLen, 
+i16 putArticle(articles_resource* resource,
+			   char* fileName, usize fileNameLen,
 			   char* buffer, usize bufferLen)
 {
 	if (fileNameLen >= FILE_PATH_LEN)

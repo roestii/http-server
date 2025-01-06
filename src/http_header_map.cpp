@@ -10,7 +10,6 @@ void init(http_header_map* result)
 	http_header_bucket* currentBucket = result->buckets;
 	for (int i = 0; i < HASH_TABLE_M; ++i, ++currentBucket)
 		currentBucket->tag = EMPTY;
-
 }
 
 void clear(http_header_map* headerMap)
@@ -18,6 +17,8 @@ void clear(http_header_map* headerMap)
 	http_header_bucket* currentBucket = headerMap->buckets;
 	for (int i = 0; i < HASH_TABLE_M; ++i, ++currentBucket)
 		currentBucket->tag = EMPTY;
+
+	headerMap->len = 0;
 }
 
 i16 insert(http_header_map* headerMap, string* fieldName, string* fieldValue)
