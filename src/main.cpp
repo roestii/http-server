@@ -51,10 +51,11 @@
 #define N_THREADS 1
 #define MAX_N_PENDING_CONNECTIONS 128
 #define PORT 8080
+#define MAX_CONNECTIONS 128
 
 #define MAX_EVENTS 16
 
-#define MEMORY_LIMIT 10 * 1024 * 1024
+#define MEMORY_LIMIT 1 * 1024 * 1024 * 1024
 #define FILE_CACHE_SIZE 8 * 1024 * 1024
 #define THREAD_LOCAL_MEMORY (MEMORY_LIMIT - FILE_CACHE_SIZE) / N_THREADS
 
@@ -87,6 +88,7 @@
 #define EXPIRATION_TIME 2
 
 CONST_MEMEQL(memEqlEmailPrefix, EMAIL_PREFIX);
+CONST_FINDMEM(memFind2Crlf, "\r\n\r\n");
 
 pthread_mutex_t killMutex;
 pthread_cond_t killSignal;
@@ -166,7 +168,8 @@ i16 writeResponse(sock_handle wh, http_response* response, buffered_response_wri
 	return 0;
 }
 
-void handleGetRequest(http_response* result, http_request* request, 
+void handleGetRequest(http_response* result, http_header* request, 
+					  char* messageBody, usize contentLength,
 					  file_cache* fileCache, arena_allocator* alloc)
 {
 	file_bucket file;
@@ -215,55 +218,23 @@ i16 validateEmail(string* email)
 }
 
 // TODO(louis): introduce error handling in case the database fails.
-i32 handlePostRequest(http_response* result, http_request* request, 
-					   arena_allocator* alloc, sqlite3* db, sqlite3_stmt* stmt)
+i32 handlePostRequest(http_response* result, http_header* request, 
+					  char* messageBody, usize contentLength,
+					  arena_allocator* alloc, sqlite3* db, sqlite3_stmt* stmt)
 {
 	// NOTE(louis): the caller has to ensure that the headerMap of the result was initialized.
-	string transferCoding;
-	string contentLength;
-	i16 hasTransferCoding = getHash(&transferCoding, &request->headerMap, 
-								 	TRANSFER_ENCODING_HASH, (string*) &TRANSFER_ENCODING_HEADER_NAME);
-	i16 hasContentLength = getHash(&contentLength, &request->headerMap, 
-								   CONTENT_LENGTH_HASH, (string*) &CONTENT_LENGTH_HEADER_NAME);
 
-	if (hasTransferCoding && hasContentLength)
+	if (contentLength > 0)
 	{
-		initEmptyResponse(result, BAD_REQUEST);
-		return 0;
-	}
-	else if (hasTransferCoding)
-	{
-		initEmptyResponse(result, NOT_IMPLEMENTED);
-		return 0;
-	}
-	else if (hasContentLength)
-	{
-		string messageBody = request->messageBody;
-		u64 contentLengthInt;
-		if (strToU64(&contentLengthInt, &contentLength) == -1)
-		{
-			initEmptyResponse(result, BAD_REQUEST);
-			return 0;
-		}
-
-		if (contentLengthInt > messageBody.len)
-		{
-			initEmptyResponse(result, TOO_LARGE);
-			return 0;
-		}
-
 		if (stringEql(&request->requestTarget, (string*) &NEWSLETTER_SIGNUP_ROUTE))
 		{
-			initEmptyResponse(result, OK);
-			insert(&result->headerMap, (string*) &CONTENT_LENGTH_HEADER_NAME, (string*) &ZERO_LEN);
-
-			if (messageBody.len < sizeof(EMAIL_PREFIX) - 1 + MIN_EMAIL_LEN)
+			if (contentLength < sizeof(EMAIL_PREFIX) - 1 + MIN_EMAIL_LEN)
 			{
 				initEmptyResponse(result, BAD_REQUEST);
 				return 0;
 			}
 
-			if (!memEqlEmailPrefix(messageBody.ptr))
+			if (!memEqlEmailPrefix(messageBody))
 			{
 				initEmptyResponse(result, BAD_REQUEST);
 				return 0;
@@ -271,8 +242,8 @@ i32 handlePostRequest(http_response* result, http_request* request,
 
 			string email = 
 			{
-				messageBody.ptr + sizeof(EMAIL_PREFIX) - 1,
-				messageBody.len - (isize) (sizeof(EMAIL_PREFIX) - 1)
+				messageBody + sizeof(EMAIL_PREFIX) - 1,
+				(isize) contentLength - (isize) (sizeof(EMAIL_PREFIX) - 1)
 			};
 		
 			if (!validateEmail(&email))
@@ -315,6 +286,8 @@ i32 handlePostRequest(http_response* result, http_request* request,
 				return rc;
 			}
 
+			insert(&result->headerMap, (string*) &CONTENT_LENGTH_HEADER_NAME, (string*) &ZERO_LEN);
+			initEmptyResponse(result, OK);
 			return 0;
 		}
 		else
@@ -330,18 +303,12 @@ i32 handlePostRequest(http_response* result, http_request* request,
 	}
 }
 
-void handlePutRequest(http_response* result, http_request* request, 
+void handlePutRequest(http_response* result, http_header* request, 
+					  char* messageBody, usize contentLength,
 					  arena_allocator* alloc, articles_resource* resource)
 {
 	// NOTE(louis): the caller has to ensure that the headerMap of the result was initialized.
-	string transferCoding;
-	string contentLength;
 	string auth;
-
-	i16 hasTransferCoding = getHash(&transferCoding, &request->headerMap, 
-								 	TRANSFER_ENCODING_HASH, (string*) &TRANSFER_ENCODING_HEADER_NAME);
-	i16 hasContentLength = getHash(&contentLength, &request->headerMap, 
-								   CONTENT_LENGTH_HASH, (string*) &CONTENT_LENGTH_HEADER_NAME);
 	i16 hasAuth = getHash(&auth, &request->headerMap, 
 						  AUTH_HEADER_HASH, (string*) &AUTH_HEADER_NAME);
 
@@ -351,28 +318,8 @@ void handlePutRequest(http_response* result, http_request* request,
 		return;
 	}
 
-	if (hasTransferCoding && hasContentLength)
-		// TODO(louis): send some response
-		// The version and the header map should already be initialized.
-		initEmptyResponse(result, BAD_REQUEST);
-	else if (hasTransferCoding)
-		initEmptyResponse(result, NOT_IMPLEMENTED);
-	else if (hasContentLength)
+	if (contentLength > 0)
 	{
-		string messageBody = request->messageBody;
-		u64 contentLengthInt;
-		if (strToU64(&contentLengthInt, &contentLength) == -1)
-		{
-			initEmptyResponse(result, BAD_REQUEST);
-			return;
-		}
-
-		if (contentLengthInt > messageBody.len)
-		{
-			initEmptyResponse(result, TOO_LARGE);
-			return;
-		}
-
 		if (stringEql(&request->requestTarget, (string*) &ADD_ARTICLE_ROUTE))
 		{
 			if (authenticate(&auth, putPasswdHash))
@@ -388,7 +335,7 @@ void handlePutRequest(http_response* result, http_request* request,
 				}
 
 				if (putArticle(resource, fileName.ptr, fileName.len, 
-			   			   	   messageBody.ptr, contentLengthInt) == -1)
+			   			   	   messageBody, contentLength) == -1)
 				{
 					initEmptyResponse(result, INTERNAL_SERVER_ERROR);
 					return;
@@ -405,33 +352,56 @@ void handlePutRequest(http_response* result, http_request* request,
 		else
 		{
 			initEmptyResponse(result, NOT_FOUND);
-			return;
 		}
 	}
 	else
+	{	
 		initEmptyResponse(result, BAD_REQUEST);
+	}
 }
 
-struct client_conn
+struct http_parser
 {
-	i32 cfd;
+	http_header header;
+	bool hasHeaders;
+	char buffer[MAX_HTTP_MESSAGE_LEN];
+	usize offset;
+
+	char* messageBody;
+	usize contentLength;
+};
+
+struct client_connection
+{
+	i32 fd;
 #if TLS
 	SSL* ssl;
 #endif
+	buffered_response_writer writer;
+	http_response response;
+	http_parser parser;
 };
 
+void init(http_parser* parser)
+{
+	parser->offset = 0;
+	parser->contentLength = 0;
+	parser->hasHeaders = false;
+	parser->messageBody = NULL;
+	init(&parser->header.headerMap);
+}
 
-void closeConnection(sock_handle sh)
+void closeConnection(pool_allocator* alloc, client_connection* conn)
 {
 #if TLS
-	i32 fd = SSL_get_fd(sh);
-	assert(fd != -1 && "Something went horribly wrong.");
-	SSL_shutdown(sh);
-	SSL_free(sh);
-	close(fd);
+	SSL_shutdown(conn->ssl);
+	SSL_free(conn->ssl);
+	close(conn->fd);
 #else
-	close(sh);
+	close(conn->fd);
 #endif
+
+	free(alloc, conn);
 }
 
 struct handle_request_args 
@@ -441,11 +411,193 @@ struct handle_request_args
 	i32 socketDescriptor;
 	articles_resource* resource;
 	sqlite3* db;
-	i32 clockId;
 #if TLS
 	SSL_CTX* ctx;
 #endif
 };
+
+i32 handleHttpRequest(client_connection* conn, file_cache* fileCache,
+				  	  arena_allocator* requestLocalMemory, sqlite3* db, 
+				      sqlite3_stmt* stmt)
+{
+	i32 retval = 0;
+	buffered_response_writer* writer = &conn->writer;
+	http_header* header = &conn->parser.header;
+	http_response* response = &conn->response;
+	char* messageBody = conn->parser.messageBody;
+	usize contentLength = conn->parser.contentLength;
+
+#if TLS
+	sock_handle sockHandle = (SSL*) conn->ssl;
+#else
+	sock_handle sockHandle = conn->fd;
+#endif
+
+	switch (conn->parser.header.method)
+	{
+		case GET:
+		{
+			handleGetRequest(response, header, messageBody, contentLength, 
+					  	     fileCache, requestLocalMemory);
+			if (writeResponse(sockHandle, response, writer) == -1)
+			{
+				retval = -1;
+				goto request_cleanup;
+			}
+			break;
+		}
+		case POST:
+		{
+			i32 rc = handlePostRequest(response, header, messageBody, contentLength, 
+							  		   requestLocalMemory, db, stmt);
+			if (rc != SQLITE_OK)
+				// TODO(louis):
+				assert(!"The database is broken, handle it properly...");
+
+			if (writeResponse(sockHandle, response, writer) == -1)
+			{
+				retval = -1;
+				goto request_cleanup;
+			}
+			break;
+		}
+		case PUT:
+		{
+			/* handlePutRequest(response, header, messageBody, contentLength, 
+					 		 requestLocalMemory, resource);
+			if (writeResponse(sockHandle, response, writer) == -1)
+			{
+				retval = -1;
+				goto request_clean_up;
+			}
+			break; */
+		}
+	}
+
+request_cleanup:
+	reset(writer);
+	clear(&response->headerMap);
+	reset(requestLocalMemory);
+	return retval;
+}
+
+i32 handleConnection(client_connection* conn, file_cache* fileCache, 
+				  	 arena_allocator* requestLocalMemory, sqlite3* db, 
+				   	 sqlite3_stmt* stmt)
+{
+	isize readBytes;
+	i16 retval;
+#if TLS
+	sock_handle sockHandle = (SSL*) conn->ssl;
+#else
+	sock_handle sockHandle = conn->fd;
+#endif
+
+	http_parser* parser = &conn->parser;
+	for (;;)
+	{
+		if (parser->offset >= MAX_HTTP_MESSAGE_LEN)
+			return -1;
+
+		readBytes = sockRead(sockHandle, parser->buffer + parser->offset, 
+					   		 MAX_HTTP_MESSAGE_LEN - parser->offset);
+		if (readBytes > 0)
+		{
+			parser->offset += readBytes;
+			for (;;)
+	  		{
+				if (!parser->hasHeaders)
+				{
+					char* ptr = memFind2Crlf(parser->buffer, parser->offset);
+					if (!ptr)
+						break;
+
+					if (parseHttpHeader(&parser->header, parser->buffer, 
+										ptr + CRLF_LEN - parser->buffer) == CORRUPTED_HEADER)
+						return -1;
+
+					parser->hasHeaders = true;
+					parser->messageBody = ptr + 2 * CRLF_LEN;
+				}
+
+				if (parser->hasHeaders)
+				{
+					string contentLengthString;
+					u64 contentLength;
+					i16 hasContentLength = getHash(&contentLengthString, &parser->header.headerMap, 
+													CONTENT_LENGTH_HASH, (string*) &CONTENT_LENGTH_HEADER_NAME);
+					if (hasContentLength)
+	  				{	
+						if (strToU64(&contentLength, &contentLengthString) == -1)
+							return -1;
+
+						usize remaining = parser->buffer + parser->offset - parser->messageBody;
+						if (remaining < contentLength)
+							break;
+
+						parser->contentLength = contentLength;
+					}
+
+					if (handleHttpRequest(conn, fileCache, requestLocalMemory, 
+					   				  	  db, stmt) == -1)
+						return -1;
+
+					memCpy(parser->buffer, parser->messageBody + parser->contentLength, 
+						   parser->buffer + parser->offset - (parser->messageBody + parser->contentLength));
+
+					parser->hasHeaders = false;
+					parser->offset = 0;
+					parser->contentLength = 0;
+					parser->messageBody = NULL;
+					clear(&parser->header.headerMap);
+				}
+			}
+		}
+		else if (readBytes == -1 && errno == EWOULDBLOCK)
+			return 0;
+		else
+	  		return -1;
+	}
+}
+
+SSL* establishSSLConnection(SSL_CTX* ctx, i32 cfd)
+{
+	SSL* ssl = SSL_new(ctx);
+	if (!ssl)
+	{
+		log("Cannot acquire ssl object.\n");
+		return NULL;
+	}
+
+	if (!SSL_set_fd(ssl, cfd))
+	{
+		log("Cannot set fd for ssl object.\n");
+		SSL_free(ssl);
+		return NULL;
+	}
+
+	i32 retval, err;
+	for (;;)
+	{
+		retval = SSL_accept(ssl);
+		if (retval == -1)
+	  	{	
+			err = SSL_get_error(ssl, retval);
+			if (err != SSL_ERROR_WANT_READ && err != SSL_ERROR_WANT_WRITE)
+				goto ssl_fail;
+		}
+		else if (retval == 0)
+			goto ssl_fail;
+		else 
+			return ssl;
+	}
+
+ssl_fail:
+	log("Cannot establish ssl connection.\n");
+	SSL_free(ssl);
+	SSL_shutdown(ssl);
+	return NULL;
+}
 
 void* handleRequests(void* args)
 {
@@ -455,7 +607,6 @@ void* handleRequests(void* args)
 	i32 serverSocket = handleRequestArgs->socketDescriptor;
 	articles_resource* resource = handleRequestArgs->resource;
 	sqlite3* db = handleRequestArgs->db;
-	i32 clockId = handleRequestArgs->clockId;
 
 #if TLS
 	SSL_CTX* ctx = handleRequestArgs->ctx;
@@ -470,10 +621,11 @@ void* handleRequests(void* args)
 	if (rc != SQLITE_OK)
 		return NULL;
 
-	http_request request;
-	http_response response;
-	init(&request.headerMap);
-	init(&response.headerMap);
+	void* addr = allocate(threadLocalMemory, MAX_CONNECTIONS * sizeof(client_connection));
+	pool_allocator connectionPool;
+	init(&connectionPool, addr, 
+	  	 MAX_CONNECTIONS * sizeof(client_connection), 
+	  	 sizeof(client_connection));
 
 	arena_allocator requestLocalMemory;
 	consume(&requestLocalMemory, threadLocalMemory);
@@ -487,9 +639,6 @@ void* handleRequests(void* args)
 
 	sock_handle sockHandle;
 	i32 nfds, cfd, tfd, fd, readBytes;
-	char requestBuffer[MAX_HTTP_MESSAGE_LEN];
-	buffered_response_writer writer;
-	init(&writer);
 
 	for (;;)
 	{
@@ -501,137 +650,39 @@ void* handleRequests(void* args)
 			{
 				socklen_t addrlen;
 				struct sockaddr_in clientSocketAddr;
-				cfd = accept(fd, (struct sockaddr*) &clientSocketAddr, &addrlen);
+				cfd = accept4(fd, (struct sockaddr*) &clientSocketAddr, &addrlen, SOCK_NONBLOCK);
 				assert(cfd != -1 && "Received invalid client socket descriptor.");
+				client_connection* conn = (client_connection*) allocate(&connectionPool);
+				if ((void*) conn == (void*) -1)
+				{
+					log("Cannot accept new connections, max connections exceeded.\n");
+					close(cfd);
+					continue;
+				}
+
+				conn->fd = cfd;
+				init(&conn->parser);
+				init(&conn->writer);
+				init(&conn->response.headerMap);
 #if TLS
-				ssl = SSL_new(ctx);
+				SSL* ssl = establishSSLConnection(ctx, cfd);
 				if (!ssl)
 				{
-					log("Cannot acquire ssl object.\n");
-					close(cfd);
-					goto request_cleanup;
+					closeConnection(&connectionPool, conn);
+					continue;
 				}
 
-				if (!SSL_set_fd(ssl, cfd))
-				{
-					log("Cannot set fd for ssl object.\n");
-					close(cfd);
-				}
-
-				if (SSL_accept(ssl) <= 0)
-				{
-					// TODO(louis): check for the individual return values.
-					log("Cannot establish ssl connection.\n");
-					closeConnection(ssl);
-				}
-
-				ev.data.ptr = ssl;	
-#else
-				ev.data.fd = cfd;	
+				conn->ssl = ssl;
 #endif
+				ev.data.ptr = conn;
 				ev.events = EPOLLIN;
 				assert(epoll_ctl(epollfd, EPOLL_CTL_ADD, cfd, &ev) != -1 && "Cannot add client socket to epoll.");
 			}
 			else
 			{
-#if TLS
-				sockHandle = (SSL*) events[i].data.ptr;
-#else
-				sockHandle = fd;
-#endif
-				readBytes = sockRead(sockHandle, requestBuffer, MAX_HTTP_HEADER_LEN);	
-
-				if (readBytes <= 0)
-				{
-					closeConnection(sockHandle);
-					goto request_cleanup;
-				}
-
-				u16 errorCode;
-				if (parseHttpRequest(&errorCode, &request, requestBuffer, readBytes) == CORRUPTED_HEADER)
-				{
-					// TODO(louis): replace this with the actual error code, and maybe make this more performant
-					initEmptyResponse(&response, BAD_REQUEST);
-					if (writeResponse(sockHandle, &response, &writer) == -1)
-						closeConnection(sockHandle);
-
-					goto request_cleanup;
-				}
-
-				string hostHeaderField;
-				if (!getHash(&hostHeaderField, &request.headerMap, 
-							 HOST_HEADER_HASH, (string*) &HOST_HEADER_NAME))
-				{
-					initEmptyResponse(&response, BAD_REQUEST);
-					if (writeResponse(sockHandle, &response, &writer) == -1)
-						closeConnection(sockHandle);
-					goto request_cleanup;
-				}
-
-				// TODO(louis): This is probably no good idea.
-				if (readBytes == MAX_HTTP_HEADER_LEN)
-				{
-					i32 n = sockRead(sockHandle, requestBuffer + MAX_HTTP_HEADER_LEN,
-									 MAX_HTTP_MESSAGE_LEN - MAX_HTTP_HEADER_LEN);
-					if (n > 0)
-					{
-						if (request.messageBody.ptr)
-							request.messageBody.len += n;
-						else
-						{
-							request.messageBody =
-							{
-								requestBuffer + MAX_HTTP_HEADER_LEN,
-								n
-							};
-						}
-					}
-				}
-
-				switch (request.method)
-				{
-					case GET:
-					{
-						handleGetRequest(&response, &request, fileCache, &requestLocalMemory);
-						if (writeResponse(sockHandle, &response, &writer) == -1)
-						{
-							closeConnection(sockHandle);
-							goto request_cleanup;
-						}
-						break;
-					}
-					case POST:
-					{
-						i32 rc = handlePostRequest(&response, &request, &requestLocalMemory, db, stmt);
-						if (rc != SQLITE_OK)
-							// TODO(louis):
-							assert(!"The database is broken, handle it properly...");
-
-						if (writeResponse(sockHandle, &response, &writer) == -1)
-						{
-							closeConnection(sockHandle);
-							goto request_cleanup;
-						}
-						break;
-					}
-					case PUT:
-					{
-						handlePutRequest(&response, &request, &requestLocalMemory, resource);
-						if (writeResponse(sockHandle, &response, &writer) == -1)
-						{
-							closeConnection(sockHandle);
-							goto request_cleanup;
-						}
-						break;
-					}
-				}
-
-			request_cleanup:
-				reset(&writer);
-				reset(&requestLocalMemory);
-				clear(&request.headerMap);
-				clear(&response.headerMap);
-				break;
+				client_connection* conn = (client_connection*) events[i].data.ptr;
+				if (handleConnection(conn, fileCache, &requestLocalMemory, db, stmt) == -1)
+					closeConnection(&connectionPool, conn);
 			}
 		}
 	}
@@ -714,10 +765,6 @@ i16 serve(u16 port)
 	}
 
 	{
-		i32 clockId;
-		if (clock_getcpuclockid(getpid(), &clockId) != 0)
-			assert(!"Unable to get clock id for the process");
-
 		file_cache fileCache;
 		if (init(&fileCache, &fileCacheMemory) == -1)
 		{
@@ -766,7 +813,6 @@ i16 serve(u16 port)
 			currentArg->threadLocalMemory = currentAlloc;
 			currentArg->resource = &resource;
 			currentArg->db = *currentDb;
-			currentArg->clockId = clockId;
 #if TLS
 			currentArg->ctx = ctx;
 #endif

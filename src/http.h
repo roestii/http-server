@@ -69,13 +69,12 @@ struct http_version
 	u8 minor;
 };
 
-struct http_request
+struct http_header 
 {
 	http_method method;
 	string requestTarget;
 	http_version version;
 	http_header_map headerMap;
-	string messageBody;
 };
 
 struct http_response 
@@ -95,7 +94,7 @@ struct buffered_response_writer
 };
 
 void initEmptyResponse(http_response*, http_status_code);
-i16 parseHttpRequest(u16* errorCode, http_request*, char*, u32);
+i16 parseHttpHeader(http_header*, char*, usize);
 const char* lookupStatusLine(http_status_code);
 i16 serializeResponse(string*, http_response*, arena_allocator*);
 

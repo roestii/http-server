@@ -11,9 +11,7 @@ CONST_MEMEQL(memEqlPost, "POST");
 CONST_MEMEQL(memEqlPut, "PUT");
 CONST_MEMEQL(memEqlCrlf, "\r\n");
 CONST_MEMEQL(memEqlHttpVersionPrefix, "HTTP/");
-
 CONST_FINDMEM(memFindCrlf, "\r\n");
-CONST_FINDMEM(memFind2Crlf, "\r\n\r\n");
 
 void initEmptyResponse(http_response* result, http_status_code statusCode)
 {
@@ -117,13 +115,13 @@ i16 parseFieldLines(http_header_map* headerMap, char* headerFieldLineStr, char* 
 	return 0;
 }
 
-i16 parseHttpRequest(u16* errorCode, http_request* result, char* buffer, u32 readBytes)
+i16 parseHttpHeader(http_header* result, char* buffer, usize headerSize)
 {
 	// NOTE(louis): Returns the pointer to the start of the message body if there is any.
 	// TODO(louis): Introduce proper error handling
 	
-	char* messageEndPtr = buffer + readBytes;
-	char* crlfPointer = memFindCrlf(buffer, readBytes);
+	char* messageEndPtr = buffer + headerSize;
+	char* crlfPointer = memFindCrlf(buffer, headerSize);
 	if (!crlfPointer)
 		return CORRUPTED_HEADER;
 
@@ -209,20 +207,8 @@ i16 parseHttpRequest(u16* errorCode, http_request* result, char* buffer, u32 rea
 	if (headerFieldLineStartPtr >= messageEndPtr)
 		return CORRUPTED_HEADER;
 
-	char* headerFieldLineEndPtr = memFind2Crlf(headerFieldLineStartPtr, messageEndPtr - headerFieldLineStartPtr);
-	if (!headerFieldLineEndPtr)
+	if (parseFieldLines(&result->headerMap, headerFieldLineStartPtr, messageEndPtr) == -1)
 		return CORRUPTED_HEADER;
-
-	if (parseFieldLines(&result->headerMap, headerFieldLineStartPtr, 
-					 	headerFieldLineEndPtr + CRLF_LEN) == -1)
-		return CORRUPTED_HEADER;
-
-	char* messageBodyStartPtr = headerFieldLineEndPtr + 2 * CRLF_LEN;
-	isize messageBodyLen = messageEndPtr - messageBodyStartPtr;
-	if (messageBodyLen <= 0)
-		result->messageBody = {0};
-	else
-		result->messageBody = { messageBodyStartPtr, messageBodyLen };
 
 	return 0;
 }

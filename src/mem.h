@@ -32,6 +32,8 @@ bool name(char* haystack) \
 #define CONST_FINDMEM(name, literal) \
 char* name(char* haystack, usize len) \
 { \
+	if (len < (sizeof(literal) - 1))\
+		return NULL;\
 	for (int i = 0; i <= len - (sizeof(literal) - 1); ++i, ++haystack) \
 	{ \
 	  	char* tmp = haystack; \
